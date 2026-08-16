@@ -51,17 +51,21 @@ RUN git clone https://github.com/NVIDIA/cutlass.git /tmp/cutlass \
 
 
 # The final image already contains CUDA 12.8, cuDNN 9, PyTorch 2.9.1, and
-# torchvision. It intentionally excludes compilers, source trees, and the
-# CUDA development toolchain from the published RunPod image.
+# torchvision. Keep the small host compiler toolchain because Torch Inductor
+# compiles CPU launcher code while warming dynamic VAE shapes at runtime.
+# CUDA extensions and the full CUDA development toolchain stay in the builder.
 FROM pytorch/pytorch:${PYTORCH_IMAGE_VERSION}-runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    CC=gcc \
+    CXX=g++
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     ca-certificates \
     ffmpeg \
     libglib2.0-0 \
