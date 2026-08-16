@@ -51,6 +51,7 @@ jobs:
           file: ./Dockerfile.h200
           platforms: linux/amd64
           push: true
+          provenance: false
           build-args: |
             MAX_JOBS=2
           tags: |
