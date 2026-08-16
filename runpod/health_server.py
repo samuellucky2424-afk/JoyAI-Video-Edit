@@ -12,6 +12,11 @@ app = FastAPI()
 
 @app.get("/ping")
 def ping():
+    """RunPod-only readiness probe served on PORT_HEALTH.
+
+    The public JoyAI server owns /health. A worker remains in RunPod's
+    initializing state (204) until that endpoint confirms the runtime loaded.
+    """
     model_port = os.getenv(
         "JOYOMNI_PORT",
         os.getenv("PORT", "8080"),
@@ -24,7 +29,7 @@ def ping():
         ) as response:
             health = json.loads(response.read())
 
-        if health.get("runtime_loaded") is True:
+        if health.get("ok") is True and health.get("runtime_loaded") is True:
             return {
                 "status": "healthy",
                 "model": "ready",
