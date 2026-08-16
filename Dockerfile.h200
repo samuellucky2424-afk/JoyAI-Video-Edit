@@ -51,8 +51,8 @@ RUN git clone https://github.com/NVIDIA/cutlass.git /tmp/cutlass \
 
 
 # The final image already contains CUDA 12.8, cuDNN 9, PyTorch 2.9.1, and
-# torchvision. Keep the small host compiler toolchain because Torch Inductor
-# compiles CPU launcher code while warming dynamic VAE shapes at runtime.
+# torchvision. Keep the small host compiler toolchain as an escape hatch for
+# deployments that explicitly re-enable Torch Inductor VAE compilation.
 # CUDA extensions and the full CUDA development toolchain stay in the builder.
 FROM pytorch/pytorch:${PYTORCH_IMAGE_VERSION}-runtime
 
@@ -101,6 +101,7 @@ ENV JOYOMNI_DEVICE=cuda:0 \
     JOYOMNI_CUDA_GRAPH=1 \
     JOYOMNI_SAGE_ATTN=1 \
     JOYOMNI_TXT_PARALLEL=1 \
+    JOYOMNI_VAE_COMPILE=0 \
     JOYOMNI_RECORD_ENABLED=0 \
     JOYOMNI_RECORD_DIR=/tmp/joyomni-recordings
 
