@@ -2,6 +2,14 @@ name: Build RunPod H200 container image
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/reduce-h200-image
+    paths:
+      - .github/workflows/build-runpod-h200.yml
+      - Dockerfile.h200
+      - deploy/requirements-h200-runtime.txt
+      - deploy/xvideo/models/vae/vae_compile.py
 
 permissions:
   contents: read
