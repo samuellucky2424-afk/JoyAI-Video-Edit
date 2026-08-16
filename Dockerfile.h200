@@ -13,7 +13,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     CUDA_HOME=/usr/local/cuda \
     TORCH_CUDA_ARCH_LIST=9.0 \
-    JOYOMNI_OPS_CUDA_ARCHS=90 \
+    JOYOMNI_OPS_CUDA_ARCHS=90a \
     MAX_JOBS=${MAX_JOBS}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -39,7 +39,9 @@ RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/SageAttention \
        python setup.py bdist_wheel --dist-dir /wheels \
     && rm -rf /tmp/SageAttention
 
-# Build JoyAI's FP8 CUDA operations for Hopper (sm_90) as a wheel.
+# Build JoyAI's FP8 CUDA operations for Hopper (sm_90a) as a wheel.
+# CUTLASS WGMMA instructions are architecture-accelerated and abort at runtime
+# when the extension is compiled only for the generic sm_90 target.
 COPY deploy/joyomni_ops /opt/joyai/deploy/joyomni_ops
 
 RUN git clone https://github.com/NVIDIA/cutlass.git /tmp/cutlass \
