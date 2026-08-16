@@ -4,8 +4,7 @@ import urllib.error
 import urllib.request
 
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Response
 
 
 app = FastAPI()
@@ -38,13 +37,9 @@ def ping():
     ):
         pass
 
-    return JSONResponse(
-        status_code=503,
-        content={
-            "status": "initializing",
-            "model": "loading",
-        },
-    )
+    # RunPod load-balancer health contract:
+    # 200 = ready, 204 = still initializing, anything else = unhealthy.
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
