@@ -10,6 +10,7 @@ on:
       - Dockerfile.h200
       - deploy/requirements-h200-runtime.txt
       - deploy/xvideo/models/vae/vae_compile.py
+      - deploy/xvideo/models/vae/vae.py
 
 permissions:
   contents: read
