@@ -49,7 +49,7 @@ try {
     $baseUrl = "https://$EndpointId.api.runpod.ai"
 
     Write-Host "Starting the JoyAI worker through GET /health..."
-    Write-Host "The H200 must load the 31 GB DiT checkpoint before RunPod routes traffic."
+    Write-Host "The H200 must load the 32.5 GB DiT checkpoint before RunPod routes traffic."
     Write-Host "A RunPod 400 'timed out waiting for worker' response is retried until the $WarmTimeoutSeconds-second safety limit."
 
     $warmTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -110,7 +110,7 @@ try {
 
     $warmTimer.Stop()
     if (-not $workerReady) {
-        throw "JoyAI did not become ready within $WarmTimeoutSeconds seconds. Stop here and inspect the worker log; do not rebuild the image or start another Pod."
+        throw "JoyAI did not become ready within $WarmTimeoutSeconds seconds. Stop the current worker in RunPod before inspecting its log; ending this client request alone does not guarantee that GPU billing has stopped. Do not rebuild the image or start another Pod."
     }
 
     Write-Host "JoyAI runtime is ready after $([int]$warmTimer.Elapsed.TotalSeconds) seconds."

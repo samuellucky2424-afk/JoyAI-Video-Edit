@@ -35,6 +35,7 @@ The system combines an MLLM-based condition encoder, a causal video VAE, and a 1
 - [x] **Stronger model version in progress.** A more powerful version is under active development, with a particular focus on advancing reference-image-guided video editing (RV2V) capabilities.
 - [ ] **Consumer GPU support.** Optimize deployment for consumer-grade GPUs such as GeForce RTX 5090.
 - [ ] **Diffusers support.** Provide a 🤗 Diffusers pipeline for JoyAI-Video-Edit to streamline loading and inference.
+- [ ] **LongV2VBench release.** Release LongV2VBench for long-form video-to-video editing evaluation.
 - [ ] **Release full training and data pipelines.** Open-source the complete training framework and data generation pipeline.
 
 ## 🎬 Showcase

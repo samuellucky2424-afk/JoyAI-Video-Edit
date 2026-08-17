@@ -69,5 +69,11 @@ the script exits.
 with `JOYOMNI_PRELOAD=1`, and RunPod cannot route that request until the worker
 has passed readiness anyway.
 
+The five-minute limit bounds how long the local test waits; it is not a hard
+RunPod billing cutoff. RunPod bills from worker start until the worker fully
+stops. If the limit expires, stop the current worker (or temporarily set max
+workers to zero) before investigating the log. Do not start a second worker or
+rebuild the image during that inspection.
+
 Stop the test with `Ctrl+C`. With zero active workers and a short idle timeout,
 RunPod can scale the worker back to zero after the connection closes.

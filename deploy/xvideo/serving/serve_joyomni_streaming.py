@@ -72,12 +72,15 @@ class SessionGate:
             ev.set()
 
 
+WS_SEND_TIMEOUT_S = 10.0
+
 REF_IMAGE_DIR = REPO_ROOT / "rv2v_reference"
 REF_IMAGE_FILES = {
     "hat": "4e481f7a-2443-4935-a841-af6113cc4236.png",
     "scarf": "5e178546-3ebf-40df-bb86-01613dd96c3b.png",
     "pink_tee": "1c182f2f-32cf-4825-904e-64c69aed2e31.png",
     "orange_glasses": "486b9561-e73d-45ca-bb2d-2a47998a0a73.png",
+    "nailong": "nailong.png",
 }
 
 def _load_ref_images() -> dict[str, str]:
@@ -125,6 +128,7 @@ def _snap_to_align(value: int, align: int) -> int:
 
 class _H264Stream:
     def __init__(self, quality: int) -> None:
+        self._lock = threading.Lock()
         self._enc = None
         self._size: tuple[int, int] | None = None
         self._crf = self.crf_for_quality(quality)
@@ -142,6 +146,10 @@ class _H264Stream:
         self._want_reset = True
 
     def encode(self, frames: list) -> list[tuple[bytes, bool]]:
+        with self._lock:
+            return self._encode_locked(frames)
+
+    def _encode_locked(self, frames: list) -> list[tuple[bytes, bool]]:
         import av
         import cv2
 
@@ -264,31 +272,59 @@ def _check_face_gate(image: Image.Image, *, onnx_path: str,
         return ("too_close", None, n_faces)
     return (None, (cx, cy, min(fw, fh) / frame_min), n_faces)
 
-def _face_present(image: Image.Image, *, onnx_path: str, score_thresh: float, min_ratio: float = 0.0, edge_margin: float = 0.0) -> bool:
+
+def _detect_gate_faces(image: Image.Image, *, onnx_path: str, score_thresh: float):
     det = _get_face_detector(onnx_path, score_thresh)
     if det is None:
-        return True
+        return None, 0.0, 0.0
+    import cv2
     import numpy as np
     rgb = np.asarray(image if image.mode == "RGB" else image.convert("RGB"))
     bgr = np.ascontiguousarray(rgb[:, :, ::-1])
     h, w = bgr.shape[:2]
+    if FACE_DETECTOR_DOWNSAMPLE > 1.0:
+        _s = 1.0 / FACE_DETECTOR_DOWNSAMPLE
+        bgr = cv2.resize(bgr, (max(2, int(round(w * _s))), max(2, int(round(h * _s)))), interpolation=cv2.INTER_AREA)
+        h, w = bgr.shape[:2]
+    det.setScoreThreshold(float(score_thresh))
     det.setInputSize((w, h))
     _, faces = det.detect(bgr)
+    out = []
+    if faces is not None:
+        for f in faces:
+            out.append((float(f[0]), float(f[1]), float(f[2]), float(f[3])))
+    return out, float(w), float(h)
+
+
+def _face_present_from(faces, w, h, *, min_ratio: float = 0.0, edge_margin: float = 0.0) -> bool:
     if faces is None:
-        return False
+        return True
     _min_side = float(min_ratio) * float(min(w, h))
     _mx = float(edge_margin) * float(w)
     _my = float(edge_margin) * float(h)
-    for f in faces:
-        if float(f[-1]) < float(score_thresh):
-            continue
-        fx, fy, fw, fh = float(f[0]), float(f[1]), float(f[2]), float(f[3])
+    for fx, fy, fw, fh in faces:
         if _min_side > 0.0 and min(fw, fh) < _min_side:
             continue
         if edge_margin > 0.0 and (fx < _mx or fy < _my or fx + fw > w - _mx or fy + fh > h - _my):
             continue
         return True
     return False
+
+
+def _count_faces_from(faces, w, h, *, count_min_ratio: float) -> int:
+    if not faces:
+        return 0
+    frame_min = float(min(w, h))
+    best = None
+    best_area = -1.0
+    shorts = []
+    for fx, fy, fw, fh in faces:
+        shorts.append(min(fw, fh))
+        if fw * fh > best_area:
+            best_area = fw * fh
+            best = (fw, fh)
+    thr = max(0.05 * frame_min, float(count_min_ratio) * min(best))
+    return sum(1 for sh in shorts if sh >= thr)
 
 
 _PERSON_NET: dict[str, Any] = {}
@@ -528,12 +564,33 @@ def _optional_positive_int(value: Any, *, name: str) -> int | None:
         raise ValueError(f"{name} must be a positive integer, got {parsed}.")
     return parsed
 
+def _preload_gate_detectors(args: argparse.Namespace) -> None:
+    try:
+        import numpy as np
+        det = _get_face_detector(args.face_detector_onnx, float(args.face_gate_score))
+        if det is not None:
+            gw = max(2, int(round(args.width / FACE_DETECTOR_DOWNSAMPLE)))
+            gh = max(2, int(round(args.height / FACE_DETECTOR_DOWNSAMPLE)))
+            det.setInputSize((gw, gh))
+            det.detect(np.zeros((gh, gw, 3), dtype=np.uint8))
+        net = _get_person_net(args.person_detector_onnx)
+        if net is not None:
+            import cv2
+            blob = cv2.dnn.blobFromImage(np.zeros((320, 320, 3), dtype=np.uint8),
+                                         1.0 / 255.0, (320, 320), swapRB=False, crop=False)
+            net.setInput(blob)
+            net.forward()
+        print("#####[GATE] detectors preloaded", flush=True)
+    except Exception as exc:
+        print(f"#####[GATE] detector preload skipped: {exc!r}", flush=True)
+
 def create_app(args: argparse.Namespace) -> FastAPI:
     def get_runtime() -> JoyOmniRuntime:
         if app.state.runtime is not None:
             return app.state.runtime
         with app.state.runtime_lock:
             if app.state.runtime is None:
+                _preload_gate_detectors(args)
                 app.state.runtime = JoyOmniRuntime.load(
                     args.dit_ckpt,
                     vae_ckpt=args.vae_ckpt,
@@ -721,17 +778,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         ref_image: Image.Image | None = None
         face_gate_pending = False
         pe_defer = False
+        pe_task: asyncio.Task | None = None
         session_max_inflight = max(0, int(args.max_inflight_chunks or 0))
-        presence_monitor = False
-        face_required = False
-        count_monitor = False
 
-        fg_score = float(args.face_gate_score)
-        fg_min_below = float(args.face_gate_min_below_ratio)
-        fg_stable = int(args.face_gate_stable_frames)
-        fg_absent = int(args.presence_absent_frames)
-
-        gate_state = {"count": 0, "cx": None, "cy": None, "absent": 0, "passthrough": False,
+        gate_state = {"count": 0, "cx": None, "cy": None, "absent": 0,
                       "absent_hold": False, "present": 0, "person_check_i": 0, "person_last": True,
                       "subject_count": None, "cand": None, "cand_n": 0, "recount": False}
         kv_reset_frames = max(0, int(args.kv_reset_frames or 0))
@@ -781,10 +831,22 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "send_state": "idle",
         }
 
+        async def _ws_send_json(payload: dict[str, Any]) -> None:
+            try:
+                await asyncio.wait_for(websocket.send_json(payload), timeout=WS_SEND_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                raise WebSocketDisconnect()
+
+        async def _ws_send_bytes(data: bytes) -> None:
+            try:
+                await asyncio.wait_for(websocket.send_bytes(data), timeout=WS_SEND_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                raise WebSocketDisconnect()
+
         async def _send_json(payload: dict[str, Any]) -> None:
             async with send_lock:
                 ws_debug["send_state"] = f"json:{payload.get('type')}"
-                await websocket.send_json(payload)
+                await _ws_send_json(payload)
                 ws_debug["last_send_at"] = time.time()
                 ws_debug["send_state"] = "idle"
 
@@ -865,7 +927,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             ws_debug["rec_out_written"] = _rec_o.frames_written
                             ws_debug["rec_out_dropped"] = _rec_o.frames_dropped_recording
                     async with send_lock:
-                        await websocket.send_json({
+                        await _ws_send_json({
                             "type": "flow_drop",
                             "count": count,
                             "outstanding": _outstanding,
@@ -896,7 +958,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
             async with send_lock:
                 ws_debug["send_state"] = f"chunk_start:{profile.get('chunk_idx')}"
-                await websocket.send_json(
+                await _ws_send_json(
                     {
                         "type": "chunk_start",
                         "count": count,
@@ -926,7 +988,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     wire, is_key = encoded, False
                 async with send_lock:
                     ws_debug["send_state"] = f"chunk_frame:{profile.get('chunk_idx')}:{idx}"
-                    await websocket.send_json(
+                    await _ws_send_json(
                         {
                             "type": "output_frame",
                             "index": idx,
@@ -939,7 +1001,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "key": is_key,
                         }
                     )
-                    await websocket.send_bytes(wire)
+                    await _ws_send_bytes(wire)
                     frames_out += 1
                     ws_debug["frames_out"] = frames_out
                     ws_debug["output_bytes"] = int(ws_debug.get("output_bytes", 0)) + len(wire)
@@ -980,7 +1042,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 _chunk_done_msg["chunk_idx"] = profile.get("chunk_idx")
             async with send_lock:
                 ws_debug["send_state"] = f"chunk_done:{profile.get('chunk_idx')}"
-                await websocket.send_json(_chunk_done_msg)
+                await _ws_send_json(_chunk_done_msg)
                 ws_debug["chunk_results_sent"] = int(ws_debug.get("chunk_results_sent", 0)) + 1
                 ws_debug["last_send_at"] = time.time()
                 ws_debug["send_state"] = "idle"
@@ -1087,7 +1149,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             return None
 
         def _close_session_sync(session_ref) -> None:
-            session_ref.close()
+            with app.state.inference_lock:
+                session_ref.close()
 
         async def _close_session_safely(session_ref, reason: str) -> None:
             try:
@@ -1176,6 +1239,16 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             except Exception as exc:
                 ws_debug["rec_error"] = f"prompts: {exc!r}"
 
+        async def _cancel_pe() -> None:
+            nonlocal pe_task
+            if pe_task is not None:
+                pe_task.cancel()
+                try:
+                    await pe_task
+                except BaseException:
+                    pass
+                pe_task = None
+
         def _start_output_task(session_ref) -> None:
             nonlocal output_task
             if session_settings is not None:
@@ -1187,6 +1260,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             nonlocal session, frames_since_session_reset, reset_count
             if session is None:
                 return
+            print(f"#####[STREAM] session reset ({reason})", flush=True)
 
             await _stop_output_task()
             await _close_session_safely(session, "kv_reset")
@@ -1229,7 +1303,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             last_activity = time.monotonic()
             last_frames_out = frames_out
             while True:
-                if frames_out != last_frames_out:
+                if frames_out != last_frames_out or pe_task is not None:
                     last_frames_out = frames_out
                     last_activity = time.monotonic()
                 if time.monotonic() - last_activity >= HOLDER_IDLE_TIMEOUT_S:
@@ -1253,6 +1327,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     if msg_type == "start":
                         print(f"#####[RESTART] 'start' received (session {'live' if session is not None else 'none'})", flush=True)
                         last_activity = time.monotonic()
+                        await _cancel_pe()
                         if session is not None:
                             print("#####[RESTART] tearing down prior session: stop_output_task", flush=True)
                             await _stop_output_task()
@@ -1303,7 +1378,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ))
                         use_pe = bool(payload.get("use_pe", args.use_pe)) and bool(os.environ.get("OPENAI_API_KEY"))
 
-                        face_gate_pending = bool(payload.get("gate_enabled", True))
+                        entry_gate = bool(payload.get("gate_enabled", True))
+                        face_gate_pending = entry_gate
                         flow["recv"] = None
                         flow["at"] = 0.0
                         flow["congested"] = False
@@ -1312,24 +1388,26 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         flow["consec"] = 0
                         flow["base"] = frames_out
 
-                        presence_monitor = bool(args.online_gate) and bool(
-                            payload.get("no_person_blank", True)
-                        )
-
-                        face_required = bool(args.online_gate) and bool(payload.get("require_face", True))
-
-                        count_monitor = bool(args.online_gate) and bool(payload.get("person_count_reedit", True))
+                        gate_on = bool(args.online_gate) and entry_gate
 
                         fg_score = float(payload.get("fg_score", args.face_gate_score))
                         fg_min_below = float(payload.get("fg_min_below_ratio", args.face_gate_min_below_ratio))
                         fg_stable = max(1, int(payload.get("fg_stable_frames", args.face_gate_stable_frames)))
                         fg_absent = max(1, int(args.presence_absent_frames))
                         fg_return = max(1, int(args.presence_return_frames))
+                        _gate_fps = float(payload.get("fps") or args.fps or 24.0)
+                        _fscale = _gate_fps / 24.0
+                        fg_stable = max(1, int(round(fg_stable * _fscale)))
+                        fg_absent = max(1, int(round(fg_absent * _fscale)))
+                        fg_return = max(1, int(round(fg_return * _fscale)))
+                        count_change_frames = max(1, int(round(int(args.person_count_change_frames) * _fscale)))
+                        body_flip_frames = max(1, int(round(int(args.person_body_flip_frames) * _fscale)))
+                        person_stride = max(1, int(round(int(args.person_check_stride) * _fscale)))
+                        gate_move_eps = float(args.face_gate_move_eps) / _fscale
                         gate_state["count"] = 0
                         gate_state["cx"] = None
                         gate_state["cy"] = None
                         gate_state["absent"] = 0
-                        gate_state["passthrough"] = False
                         gate_state["absent_hold"] = False
                         gate_state["present"] = 0
                         gate_state["person_check_i"] = 0
@@ -1424,6 +1502,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     elif msg_type == "stop":
                         ws_debug["last_message_type"] = "stop"
 
+                        await _cancel_pe()
                         await _stop_output_task()
                         await asyncio.to_thread(_stop_recorders)
                         break
@@ -1566,7 +1645,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         continue
 
                 if kv_reset_frames > 0 and frames_since_session_reset >= kv_reset_frames:
-                    face_gate_pending = True
+                    face_gate_pending = entry_gate
                     gate_state["count"] = 0
                     gate_state["cx"] = None
                     gate_state["cy"] = None
@@ -1619,7 +1698,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 gate_state["csz"] = _csz
                                 return "off_center"
                             _pcx, _pcy, _pcsz = gate_state["cx"], gate_state["cy"], gate_state.get("csz")
-                            _eps = float(args.face_gate_move_eps)
+                            _eps = gate_move_eps
                             _cap = float(args.face_gate_settle_drift)
 
                             _szeps = _eps * 0.5
@@ -1645,96 +1724,92 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             gate_state["pe_anchor"] = frame
                             return "__gate_pe__"
 
-                    if (presence_monitor or count_monitor) and not face_gate_pending:
-                        if presence_monitor:
-                            stride = max(1, int(args.person_check_stride))
-                            _tick = gate_state.get("person_check_i", 0)
-                            if _tick == 0 or gate_state.get("absent_hold"):
-                                gate_state["person_last"] = _person_present(
-                                    frame, onnx_path=args.person_detector_onnx, conf=float(args.person_gate_conf))
+                    if gate_on and not face_gate_pending:
+                        _tick = gate_state.get("person_check_i", 0)
+                        _gfaces, _gfw, _gfh = _detect_gate_faces(frame, onnx_path=args.face_detector_onnx, score_thresh=fg_score)
+                        if _tick == 0 or gate_state.get("absent_hold"):
+                            gate_state["person_last"] = _person_present(
+                                frame, onnx_path=args.person_detector_onnx, conf=float(args.person_gate_conf))
 
-                                if face_required and gate_state["person_last"]:
-                                    gate_state["face_last"] = _face_present(
-                                        frame, onnx_path=args.face_detector_onnx, score_thresh=fg_score,
-                                        min_ratio=float(args.face_present_min_ratio),
-                                        edge_margin=float(args.face_present_edge_margin))
-                                else:
-                                    gate_state["face_last"] = True
-                            gate_state["person_check_i"] = (_tick + 1) % stride
-                            _body_here = bool(gate_state["person_last"])
-                            _face_here = bool(gate_state.get("face_last", True))
-                            _present = _body_here and _face_here
-                            _reason_now = "no_person" if not _body_here else ("no_face" if not _face_here else "")
-
-                            body_flip = max(1, int(args.person_body_flip_frames))
-                            if _body_here:
-                                gate_state["body_miss"] = 0
+                            if gate_state["person_last"]:
+                                gate_state["face_last"] = _face_present_from(
+                                    _gfaces, _gfw, _gfh,
+                                    min_ratio=float(args.face_present_min_ratio),
+                                    edge_margin=float(args.face_present_edge_margin))
                             else:
-                                gate_state["body_miss"] = gate_state.get("body_miss", 0) + 1
-                            if _present:
-                                gate_state["absent"] = 0
-                                if gate_state.get("absent_hold"):
-                                    gate_state["present"] = gate_state.get("present", 0) + 1
-                                    if gate_state["present"] >= fg_return:
-                                        gate_state["absent_hold"] = False
-                                        gate_state["present"] = 0
-                                        print("#####[PERSON-GATE] subject returned (stable) -> re-run startup gate (reset)", flush=True)
-                                        return ("__person_returned__",)
+                                gate_state["face_last"] = True
+                        gate_state["person_check_i"] = (_tick + 1) % person_stride
+                        _body_here = bool(gate_state["person_last"])
+                        _face_here = bool(gate_state.get("face_last", True))
+                        _present = _body_here and _face_here
+                        _reason_now = "no_person" if not _body_here else ("no_face" if not _face_here else "")
 
-                            else:
-                                gate_state["present"] = 0
-                                gate_state["absent"] += 1
-
-                                if _reason_now == "no_person" and gate_state.get("body_miss", 0) < body_flip:
-                                    _reason_now = "no_face" if face_required else ""
-                                gate_state["hold_reason"] = _reason_now or gate_state.get("hold_reason") or "no_person"
-                                if not gate_state.get("absent_hold") and gate_state["absent"] >= fg_absent:
-                                    gate_state["absent_hold"] = True
-
-                                    try:
-                                        if session is not None:
-                                            session.pending_frames.clear()
-                                            session.pending_metas.clear()
-                                    except Exception:
-                                        pass
-                                    print(f"#####[PERSON-GATE] {gate_state['hold_reason']} for {gate_state['absent']} frames -> black-hold", flush=True)
+                        body_flip = body_flip_frames
+                        if _body_here:
+                            gate_state["body_miss"] = 0
+                        else:
+                            gate_state["body_miss"] = gate_state.get("body_miss", 0) + 1
+                        if _present:
+                            gate_state["absent"] = 0
                             if gate_state.get("absent_hold"):
-                                return ("__no_person__", gate_state.get("hold_reason", "no_person"))
+                                gate_state["present"] = gate_state.get("present", 0) + 1
+                                if gate_state["present"] >= fg_return:
+                                    gate_state["absent_hold"] = False
+                                    gate_state["present"] = 0
+                                    print("#####[PERSON-GATE] subject returned (stable) -> re-run startup gate (reset)", flush=True)
+                                    return ("__person_returned__",)
 
-                        if count_monitor:
-                            _reason_c, _, _n_faces = _check_face_gate(
-                                frame, onnx_path=args.face_detector_onnx,
-                                score_thresh=fg_score, min_below_ratio=fg_min_below,
-                                count_min_ratio=float(args.count_face_min_ratio))
-                            _n = _n_faces
-                            if gate_state["subject_count"] is None:
+                        else:
+                            gate_state["present"] = 0
+                            gate_state["absent"] += 1
+
+                            if _reason_now == "no_person" and gate_state.get("body_miss", 0) < body_flip:
+                                _reason_now = "no_face"
+                            gate_state["hold_reason"] = _reason_now or gate_state.get("hold_reason") or "no_person"
+                            if not gate_state.get("absent_hold") and gate_state["absent"] >= fg_absent:
+                                gate_state["absent_hold"] = True
+
+                                try:
+                                    if session is not None:
+                                        session.pending_frames.clear()
+                                        session.pending_metas.clear()
+                                except Exception:
+                                    pass
+                                print(f"#####[PERSON-GATE] {gate_state['hold_reason']} for {gate_state['absent']} frames -> black-hold", flush=True)
+                        if gate_state.get("absent_hold"):
+                            return ("__no_person__", gate_state.get("hold_reason", "no_person"))
+
+                        _n = _count_faces_from(
+                            _gfaces, _gfw, _gfh,
+                            count_min_ratio=float(args.count_face_min_ratio))
+                        if gate_state["subject_count"] is None:
+                            gate_state["subject_count"] = _n
+                            gate_state["cand"] = None
+                            gate_state["cand_n"] = 0
+                        elif _n > gate_state["subject_count"]:
+                            if _n == gate_state["cand"]:
+                                gate_state["cand_n"] += 1
+                            else:
+                                gate_state["cand"] = _n
+                                gate_state["cand_n"] = 1
+                            if gate_state["cand_n"] >= count_change_frames:
+                                gate_state["recount"] = True
                                 gate_state["subject_count"] = _n
                                 gate_state["cand"] = None
                                 gate_state["cand_n"] = 0
-                            elif _n > gate_state["subject_count"]:
-                                if _n == gate_state["cand"]:
-                                    gate_state["cand_n"] += 1
-                                else:
-                                    gate_state["cand"] = _n
-                                    gate_state["cand_n"] = 1
-                                if gate_state["cand_n"] >= int(args.person_count_change_frames):
-                                    gate_state["recount"] = True
-                                    gate_state["subject_count"] = _n
-                                    gate_state["cand"] = None
-                                    gate_state["cand_n"] = 0
-                            elif _n < gate_state["subject_count"]:
-                                if _n == gate_state["cand"]:
-                                    gate_state["cand_n"] += 1
-                                else:
-                                    gate_state["cand"] = _n
-                                    gate_state["cand_n"] = 1
-                                if gate_state["cand_n"] >= int(args.person_count_change_frames):
-                                    gate_state["subject_count"] = _n
-                                    gate_state["cand"] = None
-                                    gate_state["cand_n"] = 0
+                        elif _n < gate_state["subject_count"]:
+                            if _n == gate_state["cand"]:
+                                gate_state["cand_n"] += 1
                             else:
+                                gate_state["cand"] = _n
+                                gate_state["cand_n"] = 1
+                            if gate_state["cand_n"] >= count_change_frames:
+                                gate_state["subject_count"] = _n
                                 gate_state["cand"] = None
                                 gate_state["cand_n"] = 0
+                        else:
+                            gate_state["cand"] = None
+                            gate_state["cand_n"] = 0
 
                     if pe_defer and not face_gate_pending:
                         gate_state["pe_anchor"] = frame
@@ -1808,45 +1883,47 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         await _reset_session("person_returned")
                         continue
                 if isinstance(chunk_results, str) and chunk_results == "__gate_pe__":
-                    anchor = gate_state.get("pe_anchor")
-                    gate_state["pe_anchor"] = None
-                    await _send_json({"type": "pe_running", "frames_in": frames_in})
-                    try:
-                        pe_report = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                _enhance_prompt_sync,
-                                raw_prompt=raw_session_prompt,
-                                ref_image=ref_image,
-                                pe_frame=anchor,
-                                pe_model=args.pe_model,
-                            ),
-                            timeout=max(1.0, float(args.pe_timeout_s)),
-                        )
-                        enhanced = str(pe_report.get("enhanced_prompt") or raw_session_prompt)
+                    if pe_task is None:
+                        anchor = gate_state.get("pe_anchor")
+                        gate_state["pe_anchor"] = None
+                        await _send_json({"type": "pe_running", "frames_in": frames_in})
 
-                        def _swap_prompt(_sess=session, _txt=enhanced, _anchor=anchor):
-                            with app.state.inference_lock:
-                                _sess.prompt = _txt
-                                _sess._initialize(_anchor)
-                        await asyncio.to_thread(_swap_prompt)
-                        print(f"#####[PE] enhanced ok in {float(pe_report.get('elapsed_s', 0.0)):.1f}s "
-                              f"(model={pe_report.get('model')}) -> session initialized", flush=True)
-                        ws_debug["pe_report"] = pe_report
-                        await _send_json({"type": "prompt_enhanced", **pe_report})
-                    except Exception as exc:
-                        _why = "timeout" if isinstance(exc, asyncio.TimeoutError) else repr(exc)
-                        print(f"#####[PE] deferred enhance failed: {_why} -> raw prompt", flush=True)
+                        async def _run_pe(_sess=session, _anchor=anchor, _raw=raw_session_prompt, _ref=ref_image):
+                            nonlocal pe_defer, pe_report, pe_task
+                            try:
+                                report = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        _enhance_prompt_sync,
+                                        raw_prompt=_raw, ref_image=_ref,
+                                        pe_frame=_anchor, pe_model=args.pe_model,
+                                    ),
+                                    timeout=max(1.0, float(args.pe_timeout_s)),
+                                )
+                                txt = str(report.get("enhanced_prompt") or _raw)
 
-                        def _init_raw(_sess=session, _anchor=anchor):
-                            with app.state.inference_lock:
-                                _sess._initialize(_anchor)
-                        await asyncio.to_thread(_init_raw)
-                        await _send_json({"type": "prompt_enhanced", "enabled": True,
-                                          "raw_prompt": raw_session_prompt, "enhanced_prompt": raw_session_prompt,
-                                          "fallback": True, "error": True, "elapsed_s": 0.0})
-                    pe_defer = False
+                                def _swap():
+                                    with app.state.inference_lock:
+                                        _sess.prompt = txt
+                                        _sess._initialize(_anchor)
+                                await asyncio.to_thread(_swap)
+                                pe_report = report
+                                ws_debug["pe_report"] = report
+                                await _send_json({"type": "prompt_enhanced", **report})
+                            except Exception:
+                                def _swap_raw():
+                                    with app.state.inference_lock:
+                                        _sess._initialize(_anchor)
+                                await asyncio.to_thread(_swap_raw)
+                                await _send_json({"type": "prompt_enhanced", "enabled": True,
+                                                  "raw_prompt": _raw, "enhanced_prompt": _raw,
+                                                  "fallback": True, "error": True, "elapsed_s": 0.0})
+                            finally:
+                                pe_defer = False
+                                pe_task = None
+                                _write_prompt_sidecar()
+
+                        pe_task = asyncio.create_task(_run_pe())
                     last_activity = time.monotonic()
-                    _write_prompt_sidecar()
                     continue
                 if isinstance(chunk_results, str):
                     await _send_json({"type": "waiting_face", "reason": chunk_results, "frames_in": frames_in})
@@ -1899,6 +1976,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 raise
         finally:
             try:
+                await _cancel_pe()
                 await _stop_output_task()
                 await asyncio.to_thread(_stop_recorders)
                 if session is not None:
@@ -1937,22 +2015,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--face-detector-onnx", type=str, default=DEFAULT_FACE_DETECTOR_ONNX, help="YuNet ONNX weight for the face-presence gate. Missing -> gate disabled (edits run unconditionally).")
     parser.add_argument("--face-gate-score", type=float, default=0.35, help="Min YuNet confidence to count as a face. Lower = detects motion-blurred faces (fewer transient drops), but more false positives.")
-    parser.add_argument("--face-present-min-ratio", type=float, default=0.15, help="Mid-session presence: a detected face counts as 'present' only if its short side is >= this fraction of the frame short side. A too-small/partial face (subject sat down so only the top of the head shows) counts as no-face -> black-hold, instead of letting the model t2v-hallucinate a person. 0 = any face counts. Higher = stricter (black out sooner when the face gets small/far). Normal editing faces measure ~0.37, so 0.15 has a wide margin.")
+    parser.add_argument("--face-present-min-ratio", type=float, default=0.15, help="Mid-session presence: a detected face counts as 'present' only if its short side is >= this fraction of the frame short side. A too-small/partial face (subject sat down so only the top of the head shows) counts as no-face -> black-hold, instead of letting the model t2v-hallucinate a person. 0 = any face counts. Higher = stricter (black out sooner when the face gets small/far). Normal editing faces measure ~0.35, so 0.15 has a wide margin.")
     parser.add_argument("--face-present-edge-margin", type=float, default=0.0, help="Mid-session presence: a face whose box comes within this fraction of ANY frame border counts as a HALF/partial face (turned/leaned out) -> no-face -> black-hold, so the model never edits a half-face frame (which it fills in as a t2v hallucination). 0 = no edge check (default: disabled -- the face-box edge check false-blacked too eagerly when a face merely neared a border). Set e.g. 0.02 to re-enable a lenient check.")
-    parser.add_argument("--face-gate-min-below-ratio", type=float, default=0.20, help="Min fraction of frame HEIGHT that must be below the face (torso room, for garment try-on). Bigger -> stricter (must back up more).")
+    parser.add_argument("--face-gate-min-below-ratio", type=float, default=0.20, help="Min fraction of frame HEIGHT that must be below the face (torso room, for garment try-on). Bigger -> stricter: the chin must sit higher in frame (back up, sit taller, or re-aim the camera).")
+    parser.add_argument("--face-gate-center-margin", type=float, default=0.35, help="Max |face-center-x - 0.5| (fraction of width) for a SINGLE subject to count as centered. Bigger -> more lenient. SKIPPED entirely when 2+ comparable faces are present (side-by-side people can't be centered). Note: motion/stability is enforced separately by --face-gate-move-eps + --face-gate-settle-drift, so this does not affect the swing-into-frame ghost fix.")
+    parser.add_argument("--face-gate-move-eps", type=float, default=0.02, help="Max per-frame face-center movement (fraction of frame) to count as 'still'. Bigger -> tolerates more motion. Pairs with --face-gate-settle-drift (net drift from anchor) so a slow glide can't creep through frame-by-frame. Also requires per-frame face-size change <= 0.5*eps.")
+    parser.add_argument("--face-gate-settle-drift", type=float, default=0.05, help="Max net drift of the face center AND size from the settle-streak anchor (fraction of frame). Closes the 'slow continuous glide' hole where every per-frame step is < move-eps but they sum to a big slide (swing-into-frame motion baked into chunk0 -> ghost/duplicate person). Smaller = must hold more still. Complements --face-gate-move-eps (per-frame) + --face-gate-stable-frames (streak length).")
+    parser.add_argument("--face-gate-stable-frames", type=int, default=24, help="Consecutive centered+still frames required before editing starts (~24fps send rate, so 24 ≈ 1s).")
 
-    parser.add_argument("--face-gate-center-margin", type=float, default=0.28, help="Max |face-center-x - 0.5| (fraction of width) for a SINGLE subject to count as centered. Bigger -> more lenient. SKIPPED entirely when 2+ comparable faces are present (side-by-side people can't be centered). Note: motion/stability is enforced separately by --face-gate-move-eps + --face-gate-settle-drift, so this does not affect the swing-into-frame ghost fix.")
-    parser.add_argument("--face-gate-move-eps", type=float, default=0.02, help="Max per-frame face-center movement (fraction of frame) to count as 'still'. Bigger -> tolerates more motion. Pairs with --face-gate-settle-drift (cumulative) so a slow glide can't creep through frame-by-frame.")
-    parser.add_argument("--face-gate-settle-drift", type=float, default=0.05, help="Max CUMULATIVE face-center wander (fraction of frame) allowed across the whole settle streak. Closes the 'slow continuous glide' hole where every per-frame step is < move-eps but they sum to a big slide (swing-into-frame motion baked into chunk0 -> ghost/duplicate person). Smaller = must hold more still. Complements --face-gate-move-eps (per-frame) + --face-gate-stable-frames (streak length).")
-    parser.add_argument("--face-gate-stable-frames", type=int, default=12, help="Consecutive centered+still frames required before editing starts (~24fps send rate, so 12 ≈ 0.5s).")
-    parser.add_argument("--online-gate", action=argparse.BooleanOptionalAction, default=True, help="Master switch for MID-SESSION behavior (no-person black-hold + person-count re-edit). On (default) = presence/count monitoring runs for ALL sessions once editing begins. --no-online-gate to disable and make the inference path identical to the base commit.")
+    parser.add_argument("--online-gate", action=argparse.BooleanOptionalAction, default=True, help="Server-wide master for MID-SESSION monitoring (no-person black-hold + person-count re-edit). A session runs it only when its gate_enabled is also true (browser checkbox / start field, default true); the ENTRY gate follows gate_enabled alone. Also seeds the UI checkbox default. --no-online-gate disables mid-session monitoring for all sessions.")
     parser.add_argument("--presence-absent-frames", type=int, default=12, help="Consecutive not-present frames (body missing, OR face too small / half-out per --face-present-*) before the output goes black. Small = stop FAST (less T2V leak on a quick sit-down / turn-away); larger = tolerate a brief occlusion / head-turn without black-holding. ~24fps, 12 ≈ 0.5s.")
     parser.add_argument("--presence-return-frames", type=int, default=24, help="Consecutive present (body+face) frames required to LEAVE the black-hold and re-run the startup gate. Separate from --presence-absent-frames so entry stays fast (black out quickly) while exit is well de-bounced: a face flickering through finger gaps while hands cover the face won't bounce no_face<->settling. ~24fps, 24 ≈ 1s.")
-    parser.add_argument("--person-count-change-frames", type=int, default=24, help="Consecutive frames a NEW face count must hold before re-editing (reset chunk0) so people who enter later get edited. Debounce vs transient miscounts (sway / motion blur / a background face flickering in). ~24fps, 24 ≈ 1s.")
-    parser.add_argument("--count-face-min-ratio", type=float, default=0.45, help="For person-count-change: a face counts as an additional subject only if its short side is >= this fraction of the MAIN (largest/foreground) face's short side. Excludes far-smaller BACKGROUND people (e.g. a coworker behind the subject) that otherwise flip the count and trigger spurious re-edits. Higher = stricter (ignore more background). Default 0.45.")
-    parser.add_argument("--person-detector-onnx", type=str, default=DEFAULT_PERSON_DETECTOR_ONNX, help="YOLOv8n ONNX (fixed 320) for mid-session person presence via cv2.dnn. Missing -> passthrough disabled (edits always run).")
+    parser.add_argument("--person-count-change-frames", type=int, default=24, help="Consecutive frames a NEW face count must hold before it is accepted. An INCREASE then re-edits (reset chunk0) so people who enter later get edited; a decrease only lowers the baseline. Debounce vs transient miscounts (sway / motion blur / a background face flickering in). Keep this larger than --presence-absent-frames so a brief face loss black-holds instead of faking a 0->1 'new person' re-edit. ~24fps, 24 ≈ 1s.")
+    parser.add_argument("--count-face-min-ratio", type=float, default=0.45, help="For person-count-change: a face counts as an additional subject only if its short side is >= this fraction of the MAIN (largest/foreground) face's short side; an absolute floor of 5% of the frame short side also applies. Excludes far-smaller BACKGROUND people (e.g. a coworker behind the subject) that otherwise flip the count and trigger spurious re-edits. Higher = stricter (ignore more background).")
+    parser.add_argument("--person-detector-onnx", type=str, default=DEFAULT_PERSON_DETECTOR_ONNX, help="YOLOv8n ONNX (fixed 320 input) for mid-session body presence via cv2.dnn. Missing/unloadable -> the body check passes through (always 'present'); face-present rules still apply, so no_face black-holds can still trigger.")
     parser.add_argument("--person-gate-conf", type=float, default=0.4, help="Min YOLO person-class score to count the person as present.")
-    parser.add_argument("--person-check-stride", type=int, default=2, help="Run the person detector every Nth frame during editing (YOLO ~27ms; stride amortizes the cost). Smaller = faster stop/resume detection, more CPU.")
+    parser.add_argument("--person-check-stride", type=int, default=2, help="Run the person detector every Nth frame during editing (YOLO ~27ms; stride amortizes the cost). Smaller = notices the subject LEAVING sooner, more CPU. During a black-hold the check runs every frame regardless, so return detection is unaffected by the stride.")
     parser.add_argument("--person-body-flip-frames", type=int, default=6, help="Consecutive body-misses before the client reason flips to no_person. Below this, a lone YOLO dip (a hand/object over the face also clips the torso) keeps the current reason -- normally show_full_face -- so the hint doesn't strobe no_face<->no_person. Reason-only de-bounce; the black-hold timing (--presence-absent-frames) is unaffected. ~24fps, 6 ≈ 0.25s. Higher = more reluctant to ever show no_person; 1 = report no_person on the first miss (old behavior).")
     parser.add_argument("--output-quality", default="auto",
                         help="Downlink preview quality: 'auto' (RTT-adaptive) or a fixed 1-100.")

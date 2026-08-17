@@ -58,6 +58,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("timed out waiting for worker", text)
         self.assertIn("$retryableStatusCodes", text)
         self.assertIn("$WarmTimeoutSeconds", text)
+        self.assertIn("does not guarantee that GPU billing has stopped", text)
 
     def test_windows_script_opens_browser_only_after_local_health_is_ready(self):
         text = (ROOT / "runpod" / "Start-JoyAI-Realtime-Test.ps1").read_text()

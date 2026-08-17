@@ -243,8 +243,7 @@
       <span id="upqTier" class="qtier">
         <button type="button" data-upq="0.2" data-i18n="q_low">低</button>
         <button type="button" data-upq="0.4" data-i18n="q_mid">中</button>
-        <button type="button" data-upq="0.6" data-i18n="q_high">高</button>
-        <button type="button" data-upq="auto" class="on" data-i18n="q_auto">自动</button>
+        <button type="button" data-upq="0.6" class="on" data-i18n="q_high">高</button>
       </span>
     </span>
     <span class="kvreset-field keep-min">
@@ -368,7 +367,7 @@ const I18N = {
     q_downgrade_auto: " · 已自动降到低画质", q_downgrade_hint: " · 建议降低画质",
     flow_drop_tail: " · 带宽不足，正在丢帧保延迟",
     up_clamp_tail: " · 上行带宽不足，已临时降低上传画质",
-    res_notice: "本演示运行在 {res}，并非模型原生的 720×1248 分辨率",
+    res_notice: "本演示运行在 {res}，并非模型原生的 1248×720 分辨率，画质与编辑效果会略有下降",
   },
   en: {
     tagline: "Streaming video editing",
@@ -429,7 +428,7 @@ const I18N = {
     q_downgrade_auto: " · auto-lowered to low quality", q_downgrade_hint: " · consider lowering quality",
     flow_drop_tail: " · bandwidth limited, dropping frames",
     up_clamp_tail: " · uplink limited, upload quality lowered",
-    res_notice: "This demo runs at {res}, not the model's native 720×1248 resolution",
+    res_notice: "This demo runs at {res}, not the model's native 1248×720 resolution; visual quality and edit fidelity are slightly reduced",
   },
 };
 let currentLang = localStorage.getItem("joyomni_lang") || "en";
@@ -699,7 +698,6 @@ let downDelayMs = null;
 let downSkewMin = null;
 let downSkewAt = 0;
 let upClamped = false;
-let upAuto = true;
 let upClearStreak = 0;
 let upClearNeed = 4;
 let upDrainFactor = 1;
@@ -765,7 +763,6 @@ function applyOrientation(o) {
   const dims = orientDims(o);
   document.getElementById("width").value = dims.width;
   document.getElementById("height").value = dims.height;
-  autoUpQuality();
   updateCropMask();
   updateMetrics();
 }
@@ -972,7 +969,6 @@ function updateMetrics() {
     netReadoutEl.textContent = t("net_label") + " " + fmt(_rtt, "ms") + _tail;
     netReadoutEl.classList.toggle("net-warn", _hi || _fd || _uc);
   }
-  if (upAuto) highlightUpqTier("auto");
   if (dispLatencyEl) {
     dispLatencyEl.textContent = t("disp_label") + " " + fmt(editLatencyLastMs, "ms");
   }
@@ -1662,18 +1658,13 @@ async function beginSession() {
     seed: SERVER_DEFAULTS.seed,
     kv_reset_frames: Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
     output_quality: Number(downQualityUi.value),
+    fps: sendTargetFps(),
     output_codec: h264DecodeOk ? "h264" : "mjpeg",
-    input_codec: upCodecH264 ? "h264" : "mjpeg",
-    no_person_blank: faceGateDebugEnabled(),
-    require_face: faceGateDebugEnabled(),
-    person_count_reedit: false
+    input_codec: upCodecH264 ? "h264" : "mjpeg"
   };
   if (usingVideoFile) {
     startPayload.source = "file";
     startPayload.gate_enabled = false;
-    startPayload.no_person_blank = false;
-    startPayload.require_face = false;
-    startPayload.person_count_reedit = false;
   }
   if (cachedEnhancedPrompt) startPayload.enhanced_prompt = cachedEnhancedPrompt;
   if (refImage) startPayload.ref_image = refImage;
@@ -1921,6 +1912,7 @@ async function start() {
       }
       return;
     }
+    if (startingRun) return;
     const meta = pendingOutputMeta;
     pendingOutputMeta = null;
     receivedFrames += 1;
@@ -2010,6 +2002,7 @@ async function send() {
     try { if (usingVideoFile) camera.pause(); } catch (err) {}
     clearResultVideo();
     clearOutputQueue();
+    showOutputStart(true, t("busy_resetting"));
     const ok = await beginSession();
     if (ok) return;
     startingRun = false;
@@ -2024,13 +2017,13 @@ sendBtn.onclick = () => { suppressPeThisSend = false; send(); };
 const PROMPT_GROUPS = [
   {
     key: "change_clothes",
-    label: "实时换装", label_en: "Change Outfit",
+    label: "实时换装", label_en: "Real-Time Outfit Change",
     cases: [
       { title: "白T恤", title_en: "White Tee", desc: "上衣换成白色圆领纯棉T恤", desc_en: "Top → white crew-neck cotton tee", text: "将主角的上衣换成白色圆领纯棉 T 恤。", text_en: "Replace the subject's top with a white crew-neck cotton T-shirt." },
       { title: "皮夹克", title_en: "Leather Jacket", desc: "外套换成哑光黑色皮质机车夹克", desc_en: "Jacket → matte black leather biker jacket", text: "将主角的外套换成哑光黑色皮质机车夹克。", text_en: "Replace the subject's jacket with a matte black leather biker jacket." },
       { title: "汉服", title_en: "Hanfu", desc: "换成传统汉服交领右衽上衣", desc_en: "Traditional cross-collar Hanfu top", text: "将主角的服装换成传统汉服交领右衽上衣。", text_en: "Replace the subject's outfit with a traditional cross-collar (right-lapel) Hanfu top." },
       { title: "学院风衬衫", title_en: "Preppy Shirt", desc: "白衬衫配藏青V领马甲加酒红领带", desc_en: "White shirt, navy V-vest, wine tie", text: "将主角的上衣换成白衬衫搭配藏青色 V 领马甲和酒红色领带。", text_en: "Replace the subject's top with a white shirt paired with a navy V-neck vest and a wine-red tie." },
-      { title: "京东定制帽 + 墨镜", title_en: "JD Cap + Shades", desc: "戴上“京东”的红色鸭舌帽和墨镜", desc_en: "Red cap reading “京东” plus sunglasses", text: "给主角戴上写着“京东”两个汉字的红色鸭舌帽和墨镜。", text_en: "Put a red cap printed with the Chinese characters \"京东\" and a pair of sunglasses on the subject." },
+      { title: "京东定制帽 + 墨镜", title_en: "Custom JD Cap + Shades", desc: "戴上“京东”的红色鸭舌帽和墨镜", desc_en: "Red cap reading “京东” plus sunglasses", text: "给主角戴上写着“京东”两个汉字的红色鸭舌帽和墨镜。", text_en: "Put a red cap printed with the Chinese characters \"京东\" and a pair of sunglasses on the subject." },
     ],
   },
   {
@@ -2041,6 +2034,7 @@ const PROMPT_GROUPS = [
       { title: "红色围巾", title_en: "Red Scarf", desc: "围上参考图里的红色流苏围巾", desc_en: "Red tasseled scarf from the reference image", ref: "scarf", text: "将参考图中的红色流苏围巾围到主角的颈部。", text_en: "Wrap the red tasseled scarf from the reference image around the subject's neck." },
       { title: "粉色T恤", title_en: "Pink Tee", desc: "换上参考图里的粉色短袖 T 恤", desc_en: "Pink short-sleeve tee from the reference image", ref: "pink_tee", text: "将主角的衣服换成参考图里的粉色短袖 T 恤。", text_en: "Replace the subject's clothing with the pink short-sleeve T-shirt from the reference image." },
       { title: "橙色眼镜", title_en: "Orange Glasses", desc: "戴上参考图里的橙色镜片眼镜", desc_en: "Orange-tinted glasses from the reference image", ref: "orange_glasses", text: "给主角戴上参考图里的橙色镜片眼镜。", text_en: "Put the orange-tinted glasses from the reference image on the subject." },
+      { title: "奶龙", title_en: "Nailong", desc: "主角换成参考图里的黄色玩偶", desc_en: "Subject → yellow toy from the reference image", ref: "nailong", text: "将视频中的主角替换为参考图中的黄色玩偶。", text_en: "Replace the main subject in the video with the yellow toy from the reference image." },
     ],
   },
   {
@@ -2049,7 +2043,7 @@ const PROMPT_GROUPS = [
     cases: [
       { title: "3D动画", title_en: "3D Animation", desc: "渲染为3D动画电影风格", desc_en: "Render as 3D animated-film style", text: "将整个画面渲染为3D动画电影风格。应用平滑的三维建模质感、柔和的全局光照和景深，以及皮克斯风格的角色与场景渲染。", text_en: "Render the entire scene in a 3D animated-film style. Apply smooth 3D-modeled surfaces, soft global illumination and depth of field, and Pixar-style character and scene rendering." },
       { title: "油画质感", title_en: "Oil Painting", desc: "转成梵高厚涂油画风格", desc_en: "Van Gogh impasto oil-painting style", text: "将整个画面转换为梵高的画的风格。应用厚重、富有表现力的笔触，鲜艳且强烈的色彩，天空中和风景中动态旋转的纹理，以及梵高画作中特有的粗放油彩（厚涂法）效果。", text_en: "Convert the entire scene into the style of a Van Gogh painting. Apply thick, expressive brushstrokes, vivid and intense colors, dynamic swirling textures in the sky and landscape, and the coarse impasto oil effect characteristic of Van Gogh's work." },
-      { title: "像素游戏", title_en: "Pixel Art", desc: "渲染为16色像素画风格", desc_en: "Render as 16-color pixel art", text: "将整个画面渲染为16色像素画风格。", text_en: "Render the entire scene in a 16-color pixel-art style." },
+      { title: "像素画", title_en: "Pixel Art", desc: "渲染为16色像素画风格", desc_en: "Render as 16-color pixel art", text: "将整个画面渲染为16色像素画风格。", text_en: "Render the entire scene in a 16-color pixel-art style." },
       { title: "日漫赛璐璐", title_en: "Anime Cel", desc: "转成日式动漫赛璐璐风格", desc_en: "Japanese anime cel-shaded style", text: "将整个画面转换为日式动漫赛璐璐风格：干净的黑色描边、大面积平涂的纯色色块、明确的明暗二分硬边阴影和简洁的高光。", text_en: "Convert the entire scene into a Japanese anime cel-shaded style: clean black outlines, large flat areas of solid color, clear hard-edged two-tone shading, and simple highlights." },
     ],
   },
@@ -2057,10 +2051,10 @@ const PROMPT_GROUPS = [
     key: "face_edit",
     label: "外貌改造", label_en: "Look Edit",
     cases: [
-      { title: "戴上墨镜", title_en: "Sunglasses", desc: "戴一副粉色飞行员墨镜", desc_en: "Add pink aviator sunglasses", text: "给主角添加一副粉色飞行员墨镜架在鼻梁上。", text_en: "Add a pair of pink aviator sunglasses resting on the subject's nose." },
+      { title: "戴上墨镜", title_en: "Sunglasses", desc: "戴一副粉色飞行员墨镜", desc_en: "Add pink aviator sunglasses", text: "给主角添加一副粉色飞行员墨镜架在鼻梁上。", text_en: "Add a pair of pink aviator sunglasses resting on the bridge of the subject's nose." },
       { title: "戴口罩", title_en: "Face Mask", desc: "脸上戴一个医用口罩", desc_en: "Add a medical face mask", text: "给主角的脸上戴一个医用口罩。", text_en: "Put a medical face mask on the subject's face." },
       { title: "加耳环", title_en: "Earrings", desc: "双耳加一对金色圆环耳环", desc_en: "Add a pair of gold hoop earrings", text: "给主角的双耳耳垂添加一对抛光金色圆环耳环。", text_en: "Add a pair of polished gold hoop earrings to the subject's earlobes." },
-      { title: "加络腮胡", title_en: "Beard", desc: "下颌脸颊加浓密络腮胡", desc_en: "Add a thick full beard", text: "给主角的下颌和脸颊添加浓密的深黄色络腮胡须，自然卷曲，覆盖下巴和两颊。", text_en: "Add a thick dark-blond full beard to the subject's jaw and cheeks, naturally curly, covering the chin and both cheeks." },
+      { title: "加络腮胡", title_en: "Beard", desc: "下颌脸颊加浓密络腮胡", desc_en: "Add a thick full beard", text: "给主角的下颌和脸颊添加浓密的深黄色络腮胡须，自然卷曲，覆盖下巴和两颊。", text_en: "Add a thick dark-yellow full beard to the subject's jaw and cheeks, naturally curly, covering the chin and both cheeks." },
     ],
   },
   {
@@ -2069,9 +2063,8 @@ const PROMPT_GROUPS = [
     cases: [
       { title: "大理石雕塑", title_en: "Marble Statue", desc: "变成白色大理石雕塑", desc_en: "Turn into a white marble statue", text: "将主角整体转化为白色大理石雕塑：可见石材纹理和细微灰色脉络、表面呈抛光光泽、光线在曲面形成柔和高光，眼睛和头发同为石质，保持原有动作但带有雕塑般的质感。", text_en: "Transform the subject entirely into a white marble statue: visible stone texture and fine gray veining, a polished glossy surface, soft highlights on the curved surfaces, eyes and hair also made of stone, keeping the original motion but with a sculptural quality." },
       { title: "乐高小人", title_en: "LEGO Figure", desc: "变成乐高积木小人", desc_en: "Turn into a LEGO minifigure", text: "将主角转化为乐高积木小人风格：黄色圆柱形头部、表面为塑料亚光质感，五官简化为印刷贴纸式的黑色圆点眼睛和弧线微笑。", text_en: "Transform the subject into a LEGO minifigure style: a yellow cylindrical head with a matte plastic surface, facial features simplified into printed-sticker-style black dot eyes and a curved smile." },
-      { title: "赛博机械体", title_en: "Cyborg", desc: "变成半机械生化体", desc_en: "Turn into a cyborg", text: "将主角转化为机械生化体：面部露出银色金属骨架和精密齿轮、眼睛发出冷蓝光、皮肤接缝处可见荧光线路板纹路，关节处有可见的液压结构。", text_en: "Transform the subject into a cyborg: a silver metal skeleton and precision gears exposed on the face, eyes glowing cold blue, glowing circuit-board traces along the skin seams, and visible hydraulic structures at the joints." },
+      { title: "赛博机械体", title_en: "Cyborg", desc: "变成赛博机械体", desc_en: "Turn into a cyborg", text: "将主角转化为赛博机械体：面部露出银色金属骨架和精密齿轮、眼睛发出冷蓝光、皮肤接缝处可见荧光线路板纹路，关节处有可见的液压结构。", text_en: "Transform the subject into a cyborg: a silver metal skeleton and precision gears exposed on the face, eyes glowing cold blue, glowing circuit-board traces along the skin seams, and visible hydraulic structures at the joints." },
       { title: "黏土动画", title_en: "Claymation", desc: "变成定格黏土动画角色", desc_en: "Turn into a stop-motion clay character", text: "将主角转化为定格黏土动画角色：表面可见手工捏制的指纹压痕和不规则质感、色彩饱和但略带哑光、比例微微卡通化（头部略大）。", text_en: "Transform the subject into a stop-motion claymation character: visible hand-molded fingerprint dents and irregular texture, saturated but slightly matte colors, and mildly cartoonish proportions (a slightly larger head)." },
-      { title: "机器人", title_en: "Robot", desc: "变成机器人", desc_en: "Turn into a robot", text: "将主角变成一个机器人。", text_en: "Turn the subject into a robot." },
     ],
   },
   {
@@ -2085,12 +2078,12 @@ const PROMPT_GROUPS = [
   },
   {
     key: "swap_hero",
-    label: "主角变身", label_en: "Swap Identity",
+    label: "主角变身", label_en: "Transform Subject",
     cases: [
       { title: "梅西", title_en: "Messi", desc: "主角变成球星梅西", desc_en: "Turn the subject into Lionel Messi", text: "将主角变成足球明星梅西（Lionel Messi）的样貌。", text_en: "Change the subject's appearance into that of the football star Lionel Messi." },
       { title: "詹姆斯", title_en: "LeBron", desc: "主角变成球星詹姆斯", desc_en: "Turn the subject into LeBron James", text: "将主角变成篮球明星勒布朗·詹姆斯（LeBron James）的样貌。", text_en: "Change the subject's appearance into that of the basketball star LeBron James." },
       { title: "特朗普", title_en: "Trump", desc: "主角变成特朗普", desc_en: "Turn the subject into Donald Trump", text: "将主角变成美国总统特朗普（Donald Trump）的样貌。", text_en: "Change the subject's appearance into that of U.S. President Donald Trump." },
-      { title: "奥巴马", title_en: "Obama", desc: "主角变成奥巴马", desc_en: "Turn the subject into Barack Obama", text: "将主角变成美国总统奥巴马（Barack Obama）的样貌。", text_en: "Change the subject's appearance into that of U.S. President Barack Obama." },
+      { title: "奥巴马", title_en: "Obama", desc: "主角变成奥巴马", desc_en: "Turn the subject into Barack Obama", text: "将主角变成美国前总统奥巴马（Barack Obama）的样貌。", text_en: "Change the subject's appearance into that of former U.S. President Barack Obama." },
       { title: "奥特曼", title_en: "Ultraman", desc: "主角变成奥特曼", desc_en: "Turn the subject into Ultraman", text: "将主角的脸和身体变成奥特曼。", text_en: "Change the subject's face and body into Ultraman." },
       { title: "拉布拉多", title_en: "Labrador", desc: "主角变成拉布拉多", desc_en: "Turn the subject into a Labrador", text: "将主角的脸和身体变成一只拉布拉多犬。", text_en: "Change the subject's face and body into a Labrador dog." },
     ],
@@ -2542,43 +2535,18 @@ const qualityLegacyEl = document.getElementById("quality");
 function highlightUpqTier(v) {
   if (!upqTierEl) return;
   for (const b of upqTierEl.querySelectorAll("button")) {
-    const bv = b.getAttribute("data-upq");
-    b.classList.toggle("on", bv === String(v) || (v !== "auto" && Number(bv) === Number(v)));
-    b.classList.remove("auto-active");
-  }
-  if (v === "auto") {
-    const cur = effectiveUpQuality();
-    for (const b of upqTierEl.querySelectorAll("button")) {
-      if (Number(b.getAttribute("data-upq")) === Number(cur)) b.classList.add("auto-active");
-    }
+    b.classList.toggle("on", Number(b.getAttribute("data-upq")) === Number(v));
   }
 }
 function syncUpQualityUi() {
-  highlightUpqTier(upAuto ? "auto" : (qualityLegacyEl ? qualityLegacyEl.value : "0.4"));
-}
-function autoUpQuality() {
-  if (!upAuto) return;
-  const qEl = document.getElementById("quality");
-  if (!qEl) return;
-  qEl.value = 0.6;
-  highlightUpqTier("auto");
-}
-for (const id of ["width", "height", "fps"]) {
-  const el = document.getElementById(id);
-  if (el) el.addEventListener("change", autoUpQuality);
+  highlightUpqTier(qualityLegacyEl ? qualityLegacyEl.value : "0.6");
 }
 if (upqTierEl) {
   for (const b of upqTierEl.querySelectorAll("button")) {
     b.addEventListener("click", () => {
       const v = b.getAttribute("data-upq");
-      if (v === "auto") {
-        upAuto = true;
-        autoUpQuality();
-      } else {
-        upAuto = false;
-        if (qualityLegacyEl) qualityLegacyEl.value = v;
-        highlightUpqTier(v);
-      }
+      if (qualityLegacyEl) qualityLegacyEl.value = v;
+      highlightUpqTier(v);
       resetUplinkEncoder();
       updateMetrics();
     });
@@ -2639,7 +2607,6 @@ if (fpsTierEl) {
       if (fpsInputEl) fpsInputEl.value = v;
       for (const x of fpsTierEl.querySelectorAll("button")) x.classList.toggle("on", x === b);
       if (timer) { clearInterval(timer); timer = setInterval(tick, Math.floor(1000 / sendTargetFps())); }
-      autoUpQuality();
       updateMetrics();
     });
   }
@@ -2688,7 +2655,6 @@ function applyServerDefaults() {
       b.classList.toggle("on", Number(b.getAttribute("data-fps")) === Number(d.fps));
     }
   }
-  autoUpQuality();
   const boolMap = {
     freezeKvOnStatic: "freeze_kv_on_static",
     usePe: "use_pe",
