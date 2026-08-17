@@ -214,7 +214,6 @@ class JoyOmniRuntime:
         if dit_ckpt is not None:
             cfg.dit_ckpt = dit_ckpt
 
-        cfg.training_mode = False
 
         dit = load_dit(cfg, device=device_obj)
         if getattr(dit.config, "causal", False):
@@ -605,7 +604,6 @@ class JoyOmniV2VStreamingSession:
         if not getattr(self.pipeline.transformer.config, "causal", False):
             raise ValueError("Online streaming requires a causal transformer config.")
         self.pipeline.transformer.config.use_inference_kv_cache = True
-        self.pipeline._interrupt = False
 
         self.ref_image_latent = self._encode_ref_image_latent()
 

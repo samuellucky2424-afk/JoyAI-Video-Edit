@@ -43,6 +43,33 @@ export JOYOMNI_SAGE_ATTN="${JOYOMNI_SAGE_ATTN:-1}"
 export JOYOMNI_TXT_PARALLEL="${JOYOMNI_TXT_PARALLEL:-1}"
 
 RECORD_DIR="${JOYOMNI_RECORD_DIR:-$HERE/recordings}"
+RECORD_ENABLED="${JOYOMNI_RECORD_ENABLED:-1}"
+ONLINE_GATE_ENABLED="${JOYOMNI_ONLINE_GATE_ENABLED:-1}"
+EXTRA_ARGS=()
+
+case "${RECORD_ENABLED,,}" in
+  1|true|yes|on)
+    EXTRA_ARGS+=(--record-dir "$RECORD_DIR")
+    ;;
+  0|false|no|off)
+    ;;
+  *)
+    echo "JOYOMNI_RECORD_ENABLED must be one of: 1, 0, true, false, yes, no, on, off" >&2
+    exit 2
+    ;;
+esac
+
+case "${ONLINE_GATE_ENABLED,,}" in
+  1|true|yes|on)
+    ;;
+  0|false|no|off)
+    EXTRA_ARGS+=(--no-online-gate)
+    ;;
+  *)
+    echo "JOYOMNI_ONLINE_GATE_ENABLED must be one of: 1, 0, true, false, yes, no, on, off" >&2
+    exit 2
+    ;;
+esac
 
 CKPT_ROOT="${JOYOMNI_CKPT_ROOT:-$HERE/deps/checkpoints}"
 DIT_CKPT="${JOYOMNI_DIT_CKPT:-$CKPT_ROOT/JoyAI-Video-Edit/dit/joyai_video_edit_dit_0811.pth}"
@@ -61,7 +88,6 @@ python xvideo/serving/serve_joyomni_streaming.py \
   --text-encoder-ckpt "$TE_CKPT" \
   --face-detector-onnx   "$FACE_ONNX" \
   --person-detector-onnx "$PERSON_ONNX" \
-  --record-dir "$RECORD_DIR" \
   --device "$DEVICE" \
   --vae-encode-device "$DEVICE" \
   --vae-decode-device "$DEVICE" \
@@ -70,4 +96,5 @@ python xvideo/serving/serve_joyomni_streaming.py \
   --width "${JOYOMNI_WIDTH:-840}" --height "${JOYOMNI_HEIGHT:-480}" \
   --fps "${JOYOMNI_FPS:-24}" \
   --host "$HOST" --port "$PORT" \
+  "${EXTRA_ARGS[@]}" \
   "$@"

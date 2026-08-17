@@ -90,7 +90,7 @@ try {
             $retryableStatusCodes = @(400, 408, 425, 429, 500, 502, 503, 504)
             $isColdStartResponse = (
                 $retryableStatusCodes -contains $statusCode -or
-                $detail -match "timed out waiting for worker|cold start|no worker|temporarily unavailable|semaphore timeout|forcibly closed"
+                $detail -match "timed out waiting for worker|operation has timed out|cold start|no worker|temporarily unavailable|semaphore timeout|forcibly closed"
             )
 
             if (-not $isColdStartResponse) {
@@ -145,6 +145,8 @@ try {
             }
         }
         catch {
+            $localDetail = Get-ErrorDetail $_
+            Write-Host "Local proxy check $attempt failed: $localDetail"
             Start-Sleep -Seconds 1
         }
     }
