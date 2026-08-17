@@ -61,7 +61,7 @@ The script securely asks for the API key and polls `GET /health` until the
 preloaded runtime is ready. RunPod's load balancer may return HTTP `400` with
 `timed out waiting for worker` after its own two-minute wait while the worker
 is still initializing; the script treats that response as retryable up to its
-15-minute safety limit. It then starts the local HTTP/WebSocket proxy and
+30-minute safety limit. It then starts the local HTTP/WebSocket proxy and
 opens the interface. The key stays in the local process and is removed when
 the script exits.
 
@@ -69,7 +69,7 @@ the script exits.
 with `JOYOMNI_PRELOAD=1`, and RunPod cannot route that request until the worker
 has passed readiness anyway.
 
-The 15-minute limit bounds how long the local test waits; it is not a hard
+The 30-minute limit bounds how long the local test waits; it is not a hard
 RunPod billing cutoff. RunPod bills from worker start until the worker fully
 stops. If the limit expires, stop the current worker (or temporarily set max
 workers to zero) before investigating the log. Do not start a second worker or
@@ -90,6 +90,9 @@ reports `optimizations.vae_compile` and `optimizations.cuda_graph`; the strict
 H200 defaults fail startup rather than silently serving the slow eager path.
 For the live-only profile, startup precompiles the 840×480 landscape stream and
 does not spend GPU time warming unused portrait or reference-image shapes.
+After compilation, the server allows up to 300 seconds for its four asynchronous
+full-pipeline warm-up chunks. This keeps strict readiness without rejecting a
+healthy first compile when later chunks finish shortly after two minutes.
 
 Stop the test with `Ctrl+C`. With zero active workers and a short idle timeout,
 RunPod can scale the worker back to zero after the connection closes.
