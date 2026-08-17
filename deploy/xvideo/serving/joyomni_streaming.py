@@ -41,6 +41,13 @@ _FULL_WARMUP_CHUNKS = 4
 _GRAPH_CACHE_CAP = 1
 _GRAPH_CAPTURE_MAX_FAILS = 2
 
+
+def _env_on(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 def _vae_compile_module():
     from xvideo.models.vae import vae_compile as module
     return module
@@ -179,6 +186,20 @@ class JoyOmniRuntime:
         self.graph_runners: dict[tuple, StreamingGraphRunner] = {}
         self.graph_capture_failures: dict[tuple, int] = {}
 
+    def optimization_status(self) -> dict[str, Any]:
+        runners = list(self.graph_runners.values())
+        return {
+            "vae_compile": _vae_compile_module().runtime_status(),
+            "cuda_graph": {
+                "enabled": graph_env_enabled(),
+                "ready": any(getattr(runner, "ready", False) for runner in runners),
+                "ready_runners": sum(
+                    bool(getattr(runner, "ready", False)) for runner in runners
+                ),
+                "capture_failures": sum(self.graph_capture_failures.values()),
+            },
+        }
+
     @classmethod
     def load(
         cls,
@@ -251,7 +272,10 @@ class JoyOmniRuntime:
         pipeline.transformer.eval()
 
         _orientations = [(warmup_height, warmup_width)]
-        if (warmup_width, warmup_height) != (warmup_height, warmup_width):
+        if (
+            _env_on("JOYOMNI_WARMUP_BOTH_ORIENTATIONS", True)
+            and (warmup_width, warmup_height) != (warmup_height, warmup_width)
+        ):
             _orientations.append((warmup_width, warmup_height))
         _stem_mod = pipeline.vae.stem
 
@@ -272,6 +296,8 @@ class JoyOmniRuntime:
                     )
         except Exception as _vc_exc:
             print(f"#####[STREAM] VAE compile warmup skipped: {_vc_exc!r}")
+            if _env_on("JOYOMNI_VAE_COMPILE_STRICT"):
+                raise RuntimeError("required VAE decode compilation failed") from _vc_exc
 
         try:
             _vc = _vae_compile_module()
@@ -293,20 +319,28 @@ class JoyOmniRuntime:
                     autocast=_vae_ac,
                 )
 
-            _ref_basesize = getattr(cfg, "ref_image_basesize", DEFAULT_REFERENCE_IMG_IV2V_BASESIZE)
-            _ref_cfgs = generate_video_image_bucket(
-                img_basesize=_ref_basesize, bs_img=1, bs_vid=0, bs_mimg=0, bs_mvid=0,
-            )
-            _ref_hw = sorted({(c[3], c[4]) for c in _ref_cfgs})
-            _vc.maybe_setup_encode_dynamic(_src_vae)
-            _vc.warmup_encode_dynamic(
-                _src_vae, 3, _ref_hw,
-                device=_module_device(_src_vae), dtype=_vae_dt,
-                temporal_lens=(1,),
-                autocast=False,
-            )
+            if _env_on("JOYOMNI_WARMUP_REFERENCE_BUCKETS", True):
+                _ref_basesize = getattr(cfg, "ref_image_basesize", DEFAULT_REFERENCE_IMG_IV2V_BASESIZE)
+                _ref_cfgs = generate_video_image_bucket(
+                    img_basesize=_ref_basesize, bs_img=1, bs_vid=0, bs_mimg=0, bs_mvid=0,
+                )
+                _ref_hw = sorted({(c[3], c[4]) for c in _ref_cfgs})
+                _vc.maybe_setup_encode_dynamic(_src_vae)
+                _vc.warmup_encode_dynamic(
+                    _src_vae, 3, _ref_hw,
+                    device=_module_device(_src_vae), dtype=_vae_dt,
+                    temporal_lens=(1,),
+                    autocast=False,
+                )
+            else:
+                print("#####[STREAM] reference-bucket VAE warmup disabled; reference shapes compile lazily")
         except Exception as _ve_exc:
             print(f"#####[STREAM] VAE encode compile warmup skipped: {_ve_exc!r}")
+            if _env_on("JOYOMNI_VAE_COMPILE_STRICT"):
+                raise RuntimeError("required VAE encode compilation failed") from _ve_exc
+
+        if _env_on("JOYOMNI_VAE_COMPILE_STRICT"):
+            _vae_compile_module().assert_runtime_ready()
 
         runtime = cls(
             cfg=cfg,
@@ -326,6 +360,13 @@ class JoyOmniRuntime:
                     runtime.warmup_full_pipeline(height=_wh, width=_ww)
         except Exception as _wexc:
             print(f"#####[STREAM] full-pipeline warmup error (non-fatal): {_wexc!r}")
+            if _env_on("JOYOMNI_LOAD_WARMUP_STRICT"):
+                raise RuntimeError("required full-pipeline warmup failed") from _wexc
+
+        if _env_on("JOYOMNI_LOAD_WARMUP_STRICT") and graph_env_enabled():
+            ready_graphs = [runner for runner in runtime.graph_runners.values() if getattr(runner, "ready", False)]
+            if not ready_graphs:
+                raise RuntimeError("required CUDA graph was not captured during full-pipeline warmup")
 
         return runtime
 
@@ -395,9 +436,15 @@ class JoyOmniRuntime:
                 r = session.wait_async_result(timeout=0.5)
                 if r is not None:
                     completed += 1
+            if completed < num_chunks and _env_on("JOYOMNI_LOAD_WARMUP_STRICT"):
+                raise RuntimeError(
+                    f"full-pipeline warmup returned only {completed}/{num_chunks} chunks"
+                )
             print(f"#####[STREAM] full-pipeline warmup done: {completed} chunks in {time.time() - t0:.1f}s")
         except Exception as exc:
             print(f"#####[STREAM] full-pipeline warmup skipped/failed: {exc!r}")
+            if _env_on("JOYOMNI_LOAD_WARMUP_STRICT"):
+                raise
         finally:
             if session is not None:
                 try:

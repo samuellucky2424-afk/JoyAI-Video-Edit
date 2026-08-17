@@ -1,7 +1,7 @@
 param(
     [string]$EndpointId = "ex9647vtulowka",
     [int]$LocalPort = 9000,
-    [int]$WarmTimeoutSeconds = 300,
+    [int]$WarmTimeoutSeconds = 900,
     [int]$RetryDelaySeconds = 10
 )
 
@@ -50,6 +50,7 @@ try {
 
     Write-Host "Starting the JoyAI worker through GET /health..."
     Write-Host "The H200 must load the 32.5 GB DiT checkpoint before RunPod routes traffic."
+    Write-Host "The first compiled-VAE start can take longer while it creates the persistent optimization cache."
     Write-Host "A RunPod 400 'timed out waiting for worker' response is retried until the $WarmTimeoutSeconds-second safety limit."
 
     $warmTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -114,6 +115,14 @@ try {
     }
 
     Write-Host "JoyAI runtime is ready after $([int]$warmTimer.Elapsed.TotalSeconds) seconds."
+    if (
+        $null -eq $health.optimizations -or
+        -not $health.optimizations.vae_compile.ready -or
+        -not $health.optimizations.cuda_graph.ready
+    ) {
+        throw "JoyAI became reachable without the required compiled VAE and CUDA graph. Stop the worker and inspect its optimization log before testing."
+    }
+    Write-Host "Verified: compiled VAE and CUDA graph are active."
 
     $env:RUNPOD_API_KEY = $apiKey
     $proxyScript = Join-Path $PSScriptRoot "local_proxy.py"

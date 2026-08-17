@@ -603,6 +603,25 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     warmup_height=args.height,
                     warmup_width=args.width,
                 )
+                optimization_status = app.state.runtime.optimization_status()
+                print(
+                    f"#####[OPTIMIZATIONS] {json.dumps(optimization_status, sort_keys=True)}",
+                    flush=True,
+                )
+                marker_path = os.getenv("JOYOMNI_CACHE_READY_MARKER")
+                if marker_path:
+                    marker = Path(marker_path)
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                    marker.write_text(
+                        json.dumps(
+                            {
+                                "ready_at": time.time(),
+                                "optimizations": optimization_status,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                    )
         return app.state.runtime
 
     @asynccontextmanager
@@ -683,6 +702,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 "max_temporal_ids": args.max_temporal_ids,
                 "freeze_kv_on_static": args.freeze_kv_on_static,
                 "static_diff_thresh": args.static_diff_thresh,
+                "optimizations": (
+                    app.state.runtime.optimization_status()
+                    if app.state.runtime is not None
+                    else None
+                ),
             }
         )
 

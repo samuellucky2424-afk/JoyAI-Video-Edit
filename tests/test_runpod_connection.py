@@ -54,6 +54,11 @@ class RunPodConnectionContractTests(unittest.TestCase):
 
     def test_windows_script_retries_runpod_cold_start_timeout(self):
         text = (ROOT / "runpod" / "Start-JoyAI-Realtime-Test.ps1").read_text()
+        self.assertIn("[int]$WarmTimeoutSeconds = 900", text)
+        self.assertIn("first compiled-VAE start", text)
+        self.assertIn("compiled VAE and CUDA graph are active", text)
+        self.assertIn("$health.optimizations.vae_compile.ready", text)
+        self.assertIn("$health.optimizations.cuda_graph.ready", text)
         self.assertIn("while (-not $workerReady", text)
         self.assertIn("timed out waiting for worker", text)
         self.assertIn("operation has timed out", text)
@@ -98,6 +103,19 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("JOYOMNI_RECORD_ENABLED=0", dockerfile)
         self.assertIn("JOYOMNI_ONLINE_GATE_ENABLED=0", dockerfile)
         self.assertIn("JOYOMNI_FPS=20", dockerfile)
+        self.assertIn("JOYOMNI_VAE_COMPILE=1", dockerfile)
+        self.assertIn("JOYOMNI_VAE_COMPILE_STRICT=1", dockerfile)
+        self.assertIn("JOYOMNI_LOAD_WARMUP_STRICT=1", dockerfile)
+        self.assertIn("JOYOMNI_WARMUP_BOTH_ORIENTATIONS=0", dockerfile)
+        self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=0", dockerfile)
+        self.assertIn(
+            "JOYOMNI_CACHE_ROOT=/runpod-volume/joyai/cache/h200-torch291-cu128",
+            dockerfile,
+        )
+        self.assertIn('CACHE_ROOT="${JOYOMNI_CACHE_ROOT:-$HERE/deps/cache}"', launcher)
+        self.assertIn('$CACHE_ROOT/torchinductor', launcher)
+        self.assertIn('$CACHE_ROOT/triton', launcher)
+        self.assertIn('$CACHE_ROOT/nv_compute', launcher)
         self.assertIn('EXTRA_ARGS+=(--record-dir "$RECORD_DIR")', launcher)
         self.assertNotIn('  --record-dir "$RECORD_DIR" \\\n', launcher)
         self.assertNotIn('id="downloadBubble"', html)
@@ -115,6 +133,25 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("const MAX_BACKEND_PENDING_FRAMES = 16;", html)
         self.assertIn("const UPLINK_KEYFRAME_INTERVAL = 20;", html)
         self.assertIn('autoQuality = true; autoQTier = 0;', html)
+
+    def test_health_reports_required_runtime_optimizations(self):
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        vae_compile = (
+            ROOT / "deploy" / "xvideo" / "models" / "vae" / "vae_compile.py"
+        ).read_text()
+
+        self.assertIn('"optimizations": (', server)
+        self.assertIn("app.state.runtime.optimization_status()", server)
+        self.assertIn("JOYOMNI_CACHE_READY_MARKER", server)
+        self.assertIn('"vae_compile": _vae_compile_module().runtime_status()', runtime)
+        self.assertIn('"cuda_graph": {', runtime)
+        self.assertIn("assert_runtime_ready", vae_compile)
+        self.assertIn("JOYOMNI_VAE_COMPILE_STRICT", vae_compile)
 
     def test_browser_codec_probes_cannot_lock_the_send_button(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()

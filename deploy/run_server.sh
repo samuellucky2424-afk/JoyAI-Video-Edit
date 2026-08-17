@@ -26,12 +26,16 @@ fi
 
 cd "$HERE"
 
-export TORCHINDUCTOR_CACHE_DIR="$HERE/deps/cache/torchinductor"
-export TRITON_CACHE_DIR="$HERE/deps/cache/triton"
-export CUDA_CACHE_PATH="$HERE/deps/cache/nv_compute"
-export TORCHINDUCTOR_FX_GRAPH_CACHE=1
+CACHE_ROOT="${JOYOMNI_CACHE_ROOT:-$HERE/deps/cache}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$CACHE_ROOT/torchinductor}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$CACHE_ROOT/triton}"
+export CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-$CACHE_ROOT/nv_compute}"
+export TORCHINDUCTOR_FX_GRAPH_CACHE="${TORCHINDUCTOR_FX_GRAPH_CACHE:-1}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
+
+echo "JoyAI compile cache root: $CACHE_ROOT"
+echo "JoyAI VAE compile: ${JOYOMNI_VAE_COMPILE:-1} (strict=${JOYOMNI_VAE_COMPILE_STRICT:-0})"
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$HERE"
