@@ -77,6 +77,8 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertNotIn('api.runpod.ai/ping', text)
         self.assertIn('await previous_upstream.send_json({"type": "stop"})', text)
         self.assertIn('message=b"replaced by a refreshed browser"', text)
+        self.assertIn('proxy_state = request.app["proxy_state"]', text)
+        self.assertNotIn('request.app["active_upstream"] =', text)
 
     def test_proxy_relays_brotli_without_a_python_decoder(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
@@ -95,7 +97,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
         self.assertIn("JOYOMNI_RECORD_ENABLED=0", dockerfile)
         self.assertIn("JOYOMNI_ONLINE_GATE_ENABLED=0", dockerfile)
-        self.assertIn("JOYOMNI_FPS=16", dockerfile)
+        self.assertIn("JOYOMNI_FPS=20", dockerfile)
         self.assertIn('EXTRA_ARGS+=(--record-dir "$RECORD_DIR")', launcher)
         self.assertNotIn('  --record-dir "$RECORD_DIR" \\\n', launcher)
         self.assertNotIn('id="downloadBubble"', html)
@@ -104,9 +106,15 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertNotIn('id="outputWaitOverlay"', html)
         self.assertNotIn('id="outputToast"', html)
         self.assertNotIn('id="sendHint"', html)
+        self.assertIn('class="kvreset-field keep-min" style="display:none"', html)
         self.assertIn('data-upq="0.2" class="on"', html)
-        self.assertIn('data-fps="16" class="on"', html)
+        self.assertIn('data-fps="20" class="on"', html)
         self.assertIn("let autoQTier = 0;", html)
+        self.assertIn("const DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS = 100;", html)
+        self.assertIn("const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 200;", html)
+        self.assertIn("const MAX_BACKEND_PENDING_FRAMES = 16;", html)
+        self.assertIn("const UPLINK_KEYFRAME_INTERVAL = 20;", html)
+        self.assertIn('autoQuality = true; autoQTier = 0;', html)
 
     def test_browser_codec_probes_cannot_lock_the_send_button(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()

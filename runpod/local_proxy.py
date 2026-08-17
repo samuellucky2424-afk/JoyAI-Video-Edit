@@ -61,6 +61,7 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
     await downstream.prepare(request)
 
     session: ClientSession = request.app["session"]
+    proxy_state = request.app["proxy_state"]
     upstream = None
     try:
         upstream = await session.ws_connect(
@@ -73,11 +74,11 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
         # The local proxy is intentionally single-viewer. Replacing a stale
         # browser socket explicitly tells the server to release its session
         # ticket, avoiding a long queue after a page refresh.
-        async with request.app["websocket_lock"]:
-            previous_upstream = request.app.get("active_upstream")
-            previous_downstream = request.app.get("active_downstream")
-            request.app["active_upstream"] = upstream
-            request.app["active_downstream"] = downstream
+        async with proxy_state["websocket_lock"]:
+            previous_upstream = proxy_state["active_upstream"]
+            previous_downstream = proxy_state["active_downstream"]
+            proxy_state["active_upstream"] = upstream
+            proxy_state["active_downstream"] = downstream
 
         # Close the replaced pair outside the lock. The old handler also uses
         # this lock during cleanup, so awaiting its close while holding the
@@ -142,11 +143,11 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
             except (ClientError, asyncio.TimeoutError, OSError):
                 pass
             await upstream.close()
-        async with request.app["websocket_lock"]:
-            if request.app.get("active_upstream") is upstream:
-                request.app["active_upstream"] = None
-            if request.app.get("active_downstream") is downstream:
-                request.app["active_downstream"] = None
+        async with proxy_state["websocket_lock"]:
+            if proxy_state["active_upstream"] is upstream:
+                proxy_state["active_upstream"] = None
+            if proxy_state["active_downstream"] is downstream:
+                proxy_state["active_downstream"] = None
         if not downstream.closed:
             await downstream.close()
 
@@ -207,9 +208,13 @@ async def create_session(app: web.Application) -> None:
         # not require the optional Brotli package just to forward RunPod HTML.
         auto_decompress=False,
     )
-    app["websocket_lock"] = asyncio.Lock()
-    app["active_upstream"] = None
-    app["active_downstream"] = None
+    # aiohttp warns when top-level application state is mutated after startup.
+    # Keep live socket state inside one mutable object registered at startup.
+    app["proxy_state"] = {
+        "websocket_lock": asyncio.Lock(),
+        "active_upstream": None,
+        "active_downstream": None,
+    }
 
 
 async def close_session(app: web.Application) -> None:
