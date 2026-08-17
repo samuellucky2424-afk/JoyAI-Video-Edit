@@ -57,9 +57,17 @@ cd path\to\JoyAI-Video-Edit\runpod
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-JoyAI-Realtime-Test.ps1
 ```
 
-The script securely asks for the API key, warms through `POST /load`, verifies
-`GET /health`, starts the local HTTP/WebSocket proxy, and opens the interface.
-The key stays in the local process and is removed when the script exits.
+The script securely asks for the API key and polls `GET /health` until the
+preloaded runtime is ready. RunPod's load balancer may return HTTP `400` with
+`timed out waiting for worker` after its own two-minute wait while the worker
+is still initializing; the script treats that response as retryable up to its
+five-minute safety limit. It then starts the local HTTP/WebSocket proxy and
+opens the interface. The key stays in the local process and is removed when
+the script exits.
+
+`POST /load` is not used by this test flow because the container already starts
+with `JOYOMNI_PRELOAD=1`, and RunPod cannot route that request until the worker
+has passed readiness anyway.
 
 Stop the test with `Ctrl+C`. With zero active workers and a short idle timeout,
 RunPod can scale the worker back to zero after the connection closes.
