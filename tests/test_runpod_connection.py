@@ -100,9 +100,20 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertNotIn('  --record-dir "$RECORD_DIR" \\\n', launcher)
         self.assertNotIn('id="downloadBubble"', html)
         self.assertNotIn('id="outputStartOverlay"', html)
+        self.assertNotIn('id="outputIdleOverlay"', html)
+        self.assertNotIn('id="outputWaitOverlay"', html)
+        self.assertNotIn('id="outputToast"', html)
+        self.assertNotIn('id="sendHint"', html)
         self.assertIn('data-upq="0.2" class="on"', html)
         self.assertIn('data-fps="16" class="on"', html)
         self.assertIn("let autoQTier = 0;", html)
+
+    def test_browser_codec_probes_cannot_lock_the_send_button(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn("const CODEC_PROBE_TIMEOUT_MS = 1200;", html)
+        self.assertGreaterEqual(html.count("codecProbeWithTimeout("), 3)
+        self.assertIn('if (!started) throw new Error("session start was not sent")', html)
+        self.assertIn('setSendBusy(false, "");', html)
 
 
 if __name__ == "__main__":
