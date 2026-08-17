@@ -29,6 +29,20 @@ HOP_BY_HOP_HEADERS = {
 }
 
 
+def proxy_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Ignore the harmless Windows Proactor reset logged after a peer closes."""
+    error = context.get("exception")
+    message = context.get("message", "")
+    if (
+        os.name == "nt"
+        and isinstance(error, ConnectionResetError)
+        and getattr(error, "winerror", None) == 10054
+        and "_call_connection_lost" in message
+    ):
+        return
+    loop.default_exception_handler(context)
+
+
 def filtered_headers(headers) -> dict[str, str]:
     return {
         name: value
@@ -141,8 +155,14 @@ async def route_request(request: web.Request):
 
 
 async def create_session(app: web.Application) -> None:
+    if os.name == "nt":
+        asyncio.get_running_loop().set_exception_handler(proxy_exception_handler)
     app["session"] = ClientSession(
         timeout=ClientTimeout(total=None, connect=60, sock_connect=60),
+        # Relay compressed bytes and their Content-Encoding header unchanged.
+        # The browser can decode Brotli itself; the local Python proxy should
+        # not require the optional Brotli package just to forward RunPod HTML.
+        auto_decompress=False,
     )
 
 
