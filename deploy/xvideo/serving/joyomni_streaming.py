@@ -735,7 +735,8 @@ class JoyOmniV2VStreamingSession:
         ref_img_encoded = ref_img_tensor.to(device=encode_device, dtype=self.vae_dtype)
 
         _vc = _vae_compile_module()
-        encoded = _vc.encode_via_dynamic(self.pipeline.vae, ref_img_encoded)
+        with _vc.call_guard():
+            encoded = _vc.encode_via_dynamic(self.pipeline.vae, ref_img_encoded)
         if not hasattr(encoded, "latent_dist"):
             raise TypeError(f"Unsupported VAE encode output type for ref image: {type(encoded)}")
         ref_img_latent = encoded.latent_dist.sample()
@@ -1733,7 +1734,8 @@ class JoyOmniV2VStreamingSession:
         vae_ctx = _autocast_ctx(vae_device_type, self.vae_dtype, self.vae_autocast_enabled)
         with vae_ctx:
             started = self._timer_start(vae_device)
-            chunk_decoded = decode_vae.decode(decode_input, return_dict=False)[0]
+            with _vc.call_guard():
+                chunk_decoded = decode_vae.decode(decode_input, return_dict=False)[0]
             if profile is not None:
                 self._timer_record(profile, "vae_decode_s", started)
 
@@ -1760,7 +1762,8 @@ class JoyOmniV2VStreamingSession:
         prev_pixels = _vc.prep_input(prev_pixels)
         vae_ctx = _autocast_ctx(pseudo_device_type, self.vae_dtype, self.vae_autocast_enabled)
         with vae_ctx:
-            pseudo_enc = pseudo_vae.encode(prev_pixels)
+            with _vc.call_guard():
+                pseudo_enc = pseudo_vae.encode(prev_pixels)
             if hasattr(pseudo_enc, "latent_dist"):
                 pseudo_latent = pseudo_enc.latent_dist.sample()
             else:

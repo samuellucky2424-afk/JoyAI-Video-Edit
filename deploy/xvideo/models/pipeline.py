@@ -305,7 +305,8 @@ class Pipeline(DiffusionPipeline):
         from xvideo.models.vae import vae_compile as _vc
         inputs = _vc.prep_input(inputs)
 
-        latents = self.vae.encode(inputs).latent_dist.sample()
+        with _vc.call_guard():
+            latents = self.vae.encode(inputs).latent_dist.sample()
         if enable_denormalization:
             latents = self.normalize_latents(latents)
         return latents.to(original_device)
