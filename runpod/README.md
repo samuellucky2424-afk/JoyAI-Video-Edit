@@ -77,10 +77,10 @@ rebuild the image during that inspection.
 
 The H200 image defaults to live-only operation. Recording and download
 finalization are disabled, the presence gate is off, and the browser starts at
-16 FPS with low upload/downlink quality. The adaptive downlink can increase
-quality after the connection proves stable. Refreshing the browser replaces
-the previous WebSocket session instead of waiting behind its stale session
-ticket.
+20 FPS with low upload/downlink quality. Its low-latency playback buffer targets
+100 ms, and the adaptive downlink can increase quality after the connection
+proves stable. Refreshing the browser replaces the previous WebSocket session
+instead of waiting behind its stale session ticket.
 
 Stop the test with `Ctrl+C`. With zero active workers and a short idle timeout,
 RunPod can scale the worker back to zero after the connection closes.

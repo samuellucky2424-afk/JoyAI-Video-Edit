@@ -227,7 +227,7 @@
         <button type="button" data-upq="0.6" data-i18n="q_high">高</button>
       </span>
     </span>
-    <span class="kvreset-field keep-min">
+    <span class="kvreset-field keep-min" style="display:none">
       <span data-i18n="download_quality">下载清晰度</span>
       <span id="qtier" class="qtier">
         <button type="button" data-q="20" data-i18n="q_low">低</button>
@@ -244,8 +244,8 @@
         <button type="button" data-fps="30">30</button>
         <button type="button" data-fps="28">28</button>
         <button type="button" data-fps="24">24</button>
-        <button type="button" data-fps="20">20</button>
-        <button type="button" data-fps="16" class="on">16</button>
+        <button type="button" data-fps="20" class="on">20</button>
+        <button type="button" data-fps="16">16</button>
         <button type="button" data-fps="12">12</button>
         <button type="button" data-fps="8">8</button>
       </span>
@@ -265,8 +265,8 @@
     <div><input id="height" type="number" value="480" /></div>
   </div>
   <div class="row">
-    <div><input id="cameraFps" type="number" value="16" min="1" max="60" /></div>
-    <div><input id="fps" type="number" value="16" min="1" max="32" /></div>
+    <div><input id="cameraFps" type="number" value="20" min="1" max="60" /></div>
+    <div><input id="fps" type="number" value="20" min="1" max="32" /></div>
   </div>
   <div class="row">
     <div><input id="quality" type="number" value="0.2" min="0.1" max="1" step="0.01" /></div>
@@ -274,8 +274,8 @@
   <input id="steps" type="number" value="2" min="1" max="8" />
   <label><input id="smoothPlayback" type="checkbox" checked /> <span data-i18n="smooth_playback">平滑输出播放</span></label>
   <div id="playbackDelayWrap" class="row">
-    <div><input id="targetQueueDelayMs" type="number" value="200" min="0" max="5000" step="50" /></div>
-    <div><input id="maxQueueDelayMs" type="number" value="300" min="0" max="8000" step="50" /></div>
+    <div><input id="targetQueueDelayMs" type="number" value="100" min="0" max="5000" step="50" /></div>
+    <div><input id="maxQueueDelayMs" type="number" value="200" min="0" max="8000" step="50" /></div>
   </div>
   <input id="kvResetFrames" type="number" value="1080" min="0" step="1" />
   <label><input id="useMaxTemporalIds" type="checkbox" checked /> <span data-i18n="max_temporal">最大时序 ID</span></label>
@@ -617,8 +617,8 @@ let peCache = null;
 let pendingPeCacheKey = null;
 let outputPlaybackTimer = null;
 let outputPlaybackIntervalMs = null;
-const DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS = 200;
-const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 300;
+const DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS = 100;
+const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 200;
 function targetOutputQueueDelayMs() {
   const el = document.getElementById("targetQueueDelayMs");
   const raw = el && el.value !== "" ? el.value : null;
@@ -632,7 +632,7 @@ function maxOutputQueueDelayMs() {
   const v = raw === null ? NaN : Number(raw);
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS;
 }
-const MAX_BACKEND_PENDING_FRAMES = 32;
+const MAX_BACKEND_PENDING_FRAMES = 16;
 let sendRealtimeSkips = 0;
 let sentFrames = 0;
 let backendAckedFrames = 0;
@@ -1159,7 +1159,7 @@ const outMetaByTs = new Map();
 
 let upCodecH264 = false;
 let upEncoder = null;
-const UPLINK_KEYFRAME_INTERVAL = 8;
+const UPLINK_KEYFRAME_INTERVAL = 20;
 let upSeq = 0;
 const upPendingByTs = new Map();
 
@@ -2593,7 +2593,7 @@ if (qtierEl) {
     b.addEventListener("click", () => {
       const d = b.getAttribute("data-q");
       if (d === "auto") {
-        autoQuality = true; autoQTier = 2; autoQLowStreak = 0; autoQHoldTicks = 0;
+        autoQuality = true; autoQTier = 0; autoQLowStreak = 0; autoQHoldTicks = 0;
         highlightQTier("auto");
         setDownQuality(Q_TIERS[autoQTier], { live: true });
       } else {
