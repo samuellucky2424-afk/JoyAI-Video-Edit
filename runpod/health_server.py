@@ -4,8 +4,7 @@ import urllib.error
 import urllib.request
 
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Response
 
 
 app = FastAPI()
@@ -13,6 +12,11 @@ app = FastAPI()
 
 @app.get("/ping")
 def ping():
+    """RunPod-only readiness probe served on PORT_HEALTH.
+
+    The public JoyAI server owns /health. A worker remains in RunPod's
+    initializing state (204) until that endpoint confirms the runtime loaded.
+    """
     model_port = os.getenv(
         "JOYOMNI_PORT",
         os.getenv("PORT", "8080"),
@@ -25,7 +29,7 @@ def ping():
         ) as response:
             health = json.loads(response.read())
 
-        if health.get("runtime_loaded") is True:
+        if health.get("ok") is True and health.get("runtime_loaded") is True:
             return {
                 "status": "healthy",
                 "model": "ready",
@@ -38,13 +42,9 @@ def ping():
     ):
         pass
 
-    return JSONResponse(
-        status_code=503,
-        content={
-            "status": "initializing",
-            "model": "loading",
-        },
-    )
+    # RunPod load-balancer health contract:
+    # 200 = ready, 204 = still initializing, anything else = unhealthy.
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":

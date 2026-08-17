@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -127,11 +128,15 @@ class AttnBlock(nn.Module):
         k = self.k(x)
         v = self.v(x)
 
-        q = rearrange(q, "b c t h w -> (b t) 1 (h w) c")
-        k = rearrange(k, "b c t h w -> (b t) 1 (h w) c")
-        v = rearrange(v, "b c t h w -> (b t) 1 (h w) c")
+        q = rearrange(q, "b c t h w -> (b t) 1 (h w) c").contiguous()
+        k = rearrange(k, "b c t h w -> (b t) 1 (h w) c").contiguous()
+        v = rearrange(v, "b c t h w -> (b t) 1 (h w) c").contiguous()
 
-        x = F.scaled_dot_product_attention(q, k, v)
+        # This VAE uses a 1024-wide attention head. CUDA flash attention only
+        # supports head dimensions up to 256, so fused-only SDPA aborts on H200.
+        # Keep this fallback local to the VAE instead of changing DiT attention.
+        with sdpa_kernel(SDPBackend.MATH):
+            x = F.scaled_dot_product_attention(q, k, v)
         x = rearrange(x, "(b t) 1 (h w) c -> b c t h w", b=b, t=t, h=h, w=w)
 
         x = self.proj_out(x)
@@ -525,6 +530,9 @@ class Head(nn.Module):
 
 
 class XVAEChunkCausal(ModelMixin, ConfigMixin):
+    """For more technical details on high-resolution causal VAE decoding, see:
+    https://github.com/xin1u/UltraFlash
+    """
 
     @register_to_config
     def __init__(

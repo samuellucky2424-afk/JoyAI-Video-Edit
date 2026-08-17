@@ -1,21 +1,47 @@
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 
 from xvideo.inductor_autotune_fix import install as _install_autotune_fix
 
+def compile_enabled() -> bool:
+    """Return whether Torch Inductor VAE compilation is enabled.
+
+    Compilation remains enabled by default for non-serverless deployments.
+    RunPod H200 images disable it explicitly so cold workers become healthy
+    without spending minutes autotuning dozens of VAE shapes.
+    """
+    value = os.getenv("JOYOMNI_VAE_COMPILE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 # Must run before any compiled function executes, so warm restarts reuse the
 # on-disk autotune results instead of re-running coordinate descent.
-_install_autotune_fix()
+if compile_enabled():
+    _install_autotune_fix()
 
 
 _configured: set[int] = set()
 _configured_encode: set[int] = set()
 _configured_encode_dynamic: set[int] = set()
+_skip_notices: set[str] = set()
+
+
+def _skip_compile(stage: str) -> bool:
+    if compile_enabled():
+        return False
+    if stage not in _skip_notices:
+        print(f"[vae_compile] disabled by JOYOMNI_VAE_COMPILE=0; skipping {stage}")
+        _skip_notices.add(stage)
+    return True
 
 
 def maybe_setup_decode(vae) -> None:
+    if _skip_compile("decode compilation"):
+        return
     if id(vae) in _configured:
         return
     n_conv = 0
@@ -36,10 +62,14 @@ def maybe_setup_decode(vae) -> None:
 
 
 def prep_input(z: torch.Tensor) -> torch.Tensor:
+    if not compile_enabled():
+        return z
     return z.to(memory_format=torch.channels_last_3d)
 
 
 def maybe_setup_encode(vae) -> None:
+    if _skip_compile("encode compilation"):
+        return
     if id(vae) in _configured_encode:
         return
     n_conv = 0
@@ -63,6 +93,8 @@ def warmup_encode(vae, in_channels: int, h_px: int, w_px: int,
                   device: torch.device, dtype: torch.dtype,
                   temporal_lens: tuple[int, ...] = (1, 9),
                   autocast: bool = False) -> None:
+    if _skip_compile("encode warmup"):
+        return
     maybe_setup_encode(vae)
     from contextlib import nullcontext
     dev_type = torch.device(device).type
@@ -85,6 +117,8 @@ def warmup_encode(vae, in_channels: int, h_px: int, w_px: int,
 
 
 def maybe_setup_encode_dynamic(vae) -> None:
+    if _skip_compile("dynamic encode compilation"):
+        return
     if id(vae) in _configured_encode_dynamic:
         return
     if hasattr(vae, "_encode"):
@@ -113,6 +147,8 @@ def encode_via_dynamic(vae, x: torch.Tensor):
 def warmup_encode_dynamic(vae, in_channels: int, hw_list, device: torch.device,
                           dtype: torch.dtype, temporal_lens: tuple[int, ...] = (1,),
                           autocast: bool = False) -> None:
+    if _skip_compile("dynamic encode warmup"):
+        return
     fn = getattr(vae, "_encode_dynamic", None)
     if fn is None:
         print("[vae_compile] warmup_encode_dynamic skipped: _encode_dynamic not set up")
@@ -144,6 +180,8 @@ def warmup_decode(vae, latent_channels: int, h_lat: int, w_lat: int,
                   device: torch.device, dtype: torch.dtype,
                   temporal_lens: tuple[int, ...] = (1, 2),
                   autocast: bool = True) -> None:
+    if _skip_compile("decode warmup"):
+        return
     maybe_setup_decode(vae)
     from contextlib import nullcontext
     dev_type = torch.device(device).type

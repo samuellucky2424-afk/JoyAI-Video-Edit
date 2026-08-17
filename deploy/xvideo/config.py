@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Any
 
 
-# Default checkpoint locations (users clone weights into opensource/deps/checkpoints).
+# Default checkpoint locations (users clone weights into deps/checkpoints).
 _CKPT_ROOT = Path(__file__).resolve().parents[1] / "deps" / "checkpoints"
-_DEFAULT_VAE_PATH = _CKPT_ROOT / "xvideo_xvae-released-ckpt" / "v0_7-f16x16x8-c64-step104k"
+_DEFAULT_VAE_PATH = _CKPT_ROOT / "JoyAI-Video-Edit" / "vae"
 _DEFAULT_TEXT_ENCODER_PATH = _CKPT_ROOT / "MiMo-VL-7B-RL-2508"
 
 
@@ -15,7 +15,6 @@ class ExpConfig:
 
     seed: int = 42
 
-    # In-repo perf-optimized DiT (FA4 / FP8 / KV-memo), source-id-RoPE architecture.
     dit_ckpt: str | None = None
     dit_arch_config: dict[str, Any] = field(
         default_factory=lambda: {
