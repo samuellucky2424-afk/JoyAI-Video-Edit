@@ -54,7 +54,8 @@ class RunPodConnectionContractTests(unittest.TestCase):
 
     def test_windows_script_retries_runpod_cold_start_timeout(self):
         text = (ROOT / "runpod" / "Start-JoyAI-Realtime-Test.ps1").read_text()
-        self.assertIn("[int]$WarmTimeoutSeconds = 900", text)
+        self.assertIn("[int]$WarmTimeoutSeconds = 1800", text)
+        self.assertIn("up to 30 minutes", text)
         self.assertIn("first compiled-VAE start", text)
         self.assertIn("compiled VAE and CUDA graph are active", text)
         self.assertIn("$health.optimizations.vae_compile.ready", text)
@@ -106,6 +107,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("JOYOMNI_VAE_COMPILE=1", dockerfile)
         self.assertIn("JOYOMNI_VAE_COMPILE_STRICT=1", dockerfile)
         self.assertIn("JOYOMNI_LOAD_WARMUP_STRICT=1", dockerfile)
+        self.assertIn("JOYOMNI_FULL_WARMUP_TIMEOUT_SECONDS=300", dockerfile)
         self.assertIn("JOYOMNI_WARMUP_BOTH_ORIENTATIONS=0", dockerfile)
         self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=0", dockerfile)
         self.assertIn(
@@ -150,6 +152,8 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("JOYOMNI_CACHE_READY_MARKER", server)
         self.assertIn('"vae_compile": _vae_compile_module().runtime_status()', runtime)
         self.assertIn('"cuda_graph": {', runtime)
+        self.assertIn('"JOYOMNI_FULL_WARMUP_TIMEOUT_SECONDS"', runtime)
+        self.assertIn("time.monotonic() + timeout_seconds", runtime)
         self.assertIn("assert_runtime_ready", vae_compile)
         self.assertIn("JOYOMNI_VAE_COMPILE_STRICT", vae_compile)
 

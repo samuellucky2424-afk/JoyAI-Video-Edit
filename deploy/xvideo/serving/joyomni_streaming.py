@@ -38,6 +38,7 @@ def _autocast_ctx(device_type: str, dtype: torch.dtype, enabled: bool):
 
 
 _FULL_WARMUP_CHUNKS = 4
+_FULL_WARMUP_TIMEOUT_SECONDS = 300.0
 _GRAPH_CACHE_CAP = 1
 _GRAPH_CAPTURE_MAX_FAILS = 2
 
@@ -359,8 +360,10 @@ class JoyOmniRuntime:
                 for (_wh, _ww) in _orientations:
                     runtime.warmup_full_pipeline(height=_wh, width=_ww)
         except Exception as _wexc:
-            print(f"#####[STREAM] full-pipeline warmup error (non-fatal): {_wexc!r}")
-            if _env_on("JOYOMNI_LOAD_WARMUP_STRICT"):
+            _warmup_strict = _env_on("JOYOMNI_LOAD_WARMUP_STRICT")
+            _severity = "fatal" if _warmup_strict else "non-fatal"
+            print(f"#####[STREAM] full-pipeline warmup error ({_severity}): {_wexc!r}")
+            if _warmup_strict:
                 raise RuntimeError("required full-pipeline warmup failed") from _wexc
 
         if _env_on("JOYOMNI_LOAD_WARMUP_STRICT") and graph_env_enabled():
@@ -431,8 +434,21 @@ class JoyOmniRuntime:
                 if completed >= num_chunks:
                     break
 
-            deadline = time.time() + 120.0
-            while completed < num_chunks and time.time() < deadline:
+            timeout_seconds = max(
+                30.0,
+                float(
+                    os.environ.get(
+                        "JOYOMNI_FULL_WARMUP_TIMEOUT_SECONDS",
+                        str(_FULL_WARMUP_TIMEOUT_SECONDS),
+                    )
+                ),
+            )
+            print(
+                f"#####[STREAM] waiting up to {timeout_seconds:.0f}s for "
+                f"{num_chunks - completed} warmup chunk(s)"
+            )
+            deadline = time.monotonic() + timeout_seconds
+            while completed < num_chunks and time.monotonic() < deadline:
                 r = session.wait_async_result(timeout=0.5)
                 if r is not None:
                     completed += 1
