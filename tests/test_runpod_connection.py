@@ -156,6 +156,12 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("time.monotonic() + timeout_seconds", runtime)
         self.assertIn("assert_runtime_ready", vae_compile)
         self.assertIn("JOYOMNI_VAE_COMPILE_STRICT", vae_compile)
+        self.assertIn("def call_guard():", vae_compile)
+        self.assertIn('"thread_call_guard": compile_enabled()', vae_compile)
+        self.assertIn("with _vc.call_guard():", runtime)
+        self.assertIn("with _vc.call_guard():", (
+            ROOT / "deploy" / "xvideo" / "models" / "pipeline.py"
+        ).read_text())
 
     def test_browser_codec_probes_cannot_lock_the_send_button(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
