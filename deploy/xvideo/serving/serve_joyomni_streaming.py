@@ -73,6 +73,10 @@ class SessionGate:
 
 
 WS_SEND_TIMEOUT_S = 10.0
+HOLDER_IDLE_TIMEOUT_S = max(
+    10.0,
+    float(os.environ.get("JOYOMNI_SESSION_IDLE_TIMEOUT_SECONDS", "60")),
+)
 
 REF_IMAGE_DIR = REPO_ROOT / "rv2v_reference"
 REF_IMAGE_FILES = {
@@ -1319,7 +1323,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
             app.state.ws_debug = ws_debug
 
-            HOLDER_IDLE_TIMEOUT_S = 10.0
             last_activity = time.monotonic()
             last_frames_out = frames_out
             while True:
@@ -1327,6 +1330,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     last_frames_out = frames_out
                     last_activity = time.monotonic()
                 if time.monotonic() - last_activity >= HOLDER_IDLE_TIMEOUT_S:
+                    print(
+                        f"#####[WS-GUARD] releasing session after "
+                        f"{HOLDER_IDLE_TIMEOUT_S:.0f}s without browser or output activity",
+                        flush=True,
+                    )
                     try:
                         await _send_json(
                             {
@@ -1344,6 +1352,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 if "text" in message and message["text"] is not None:
                     payload = json.loads(message["text"])
                     msg_type = payload.get("type")
+                    # ACK and ping messages prove that the live browser and its
+                    # camera loop are still reachable.  The old 10-second guard
+                    # ignored them, so a short frame/backpressure pause could
+                    # release a healthy session and leave the last frame frozen.
+                    last_activity = time.monotonic()
+                    ws_debug["last_client_activity_at"] = time.time()
                     if msg_type == "start":
                         print(f"#####[RESTART] 'start' received (session {'live' if session is not None else 'none'})", flush=True)
                         last_activity = time.monotonic()

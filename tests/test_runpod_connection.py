@@ -170,6 +170,37 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('if (!started) throw new Error("session start was not sent")', html)
         self.assertIn('setSendBusy(false, "");', html)
 
+    def test_live_session_pings_prevent_false_idle_disconnects(self):
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        self.assertIn('JOYOMNI_SESSION_IDLE_TIMEOUT_SECONDS", "60"', server)
+        self.assertIn('ws_debug["last_client_activity_at"] = time.time()', server)
+        ping_handler = server.index('elif msg_type == "ping":')
+        client_activity = server.rindex(
+            'last_activity = time.monotonic()', 0, ping_handler
+        )
+        payload_decode = server.rindex(
+            'payload = json.loads(message["text"])', 0, ping_handler
+        )
+        self.assertGreater(client_activity, payload_decode)
+        self.assertIn("releasing session after", server)
+
+    def test_browser_recovers_an_unexpected_websocket_close(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn("let streamingWanted = false;", html)
+        self.assertIn("function scheduleReconnect()", html)
+        self.assertIn("RECONNECT_MAX_DELAY_MS", html)
+        self.assertIn("scheduleReconnect();", html)
+        self.assertIn("streamingWanted = false;\n  cancelReconnect();", html)
+        self.assertIn("streamingWanted = true;\n  await start();", html)
+
+    def test_proxy_reports_websocket_close_codes(self):
+        text = (ROOT / "runpod" / "local_proxy.py").read_text()
+        self.assertIn("JoyAI WebSocket connected through RunPod.", text)
+        self.assertIn("JoyAI WebSocket closed", text)
+        self.assertIn('f"(browser={downstream_code}, RunPod={upstream_code})."', text)
+
 
 if __name__ == "__main__":
     unittest.main()
