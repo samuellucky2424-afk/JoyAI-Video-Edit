@@ -214,7 +214,6 @@
     <span id="netReadout" class="keep-min">-</span>
     <span id="dispLatency" class="keep-min">-</span>
     <span id="fpsReadout" class="keep-min">-</span>
-    <span id="sendHint" class="send-hint keep-min"></span>
   </div>
   <div class="cmd-foot minimal">
     <label id="peToggle" class="pe-toggle keep-min"><input id="usePe" type="checkbox" checked style="width:auto" /> <span data-i18n="pe_toggle">提示词增强</span></label>
@@ -1139,8 +1138,17 @@ function trimOutputQueueForLatency() {
 
 let h264DecodeOk = false;
 let h264DecodeReady = Promise.resolve(false);
+const CODEC_PROBE_TIMEOUT_MS = 1200;
+function codecProbeWithTimeout(probe, fallback = false) {
+  return Promise.race([
+    Promise.resolve(probe).catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), CODEC_PROBE_TIMEOUT_MS)),
+  ]);
+}
 if (typeof VideoDecoder !== "undefined") {
-  h264DecodeReady = VideoDecoder.isConfigSupported({ codec: "avc1.640028", optimizeForLatency: true })
+  h264DecodeReady = codecProbeWithTimeout(
+    VideoDecoder.isConfigSupported({ codec: "avc1.640028", optimizeForLatency: true })
+  )
     .then((s) => { h264DecodeOk = !!(s && s.supported); return h264DecodeOk; })
     .catch(() => false);
 }
@@ -1630,7 +1638,10 @@ async function beginSession() {
   upCodecH264 = false;
   if (!usingVideoFile && typeof VideoEncoder !== "undefined") {
     try {
-      const s = await VideoEncoder.isConfigSupported(upEncoderConfig(width, height));
+      const s = await codecProbeWithTimeout(
+        VideoEncoder.isConfigSupported(upEncoderConfig(width, height)),
+        null
+      );
       upCodecH264 = !!(s && s.supported);
     } catch (e) {}
   }
@@ -1698,7 +1709,12 @@ async function start() {
         sessionGranted = true;
         setSendBusy(true, t("busy_starting"));
         showOutputStart(true, t("busy_starting"));
-        beginSession();
+        try {
+          const started = await beginSession();
+          if (!started) throw new Error("session start was not sent");
+        } catch (err) {
+          stopActiveRun();
+        }
         return;
       }
       if (msg.type === "started") {
@@ -1976,6 +1992,9 @@ function stopActiveRun() {
     currentWs.onclose = null;
     try { currentWs.close(); } catch (err) {}
   }
+  startingRun = false;
+  sessionGranted = false;
+  setSendBusy(false, "");
 }
 
 async function send() {
