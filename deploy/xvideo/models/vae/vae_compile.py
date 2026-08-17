@@ -10,12 +10,18 @@ from xvideo.inductor_autotune_fix import install as _install_autotune_fix
 def compile_enabled() -> bool:
     """Return whether Torch Inductor VAE compilation is enabled.
 
-    Compilation remains enabled by default for non-serverless deployments.
-    RunPod H200 images disable it explicitly so cold workers become healthy
-    without spending minutes autotuning dozens of VAE shapes.
+    Compilation remains enabled by default. Serverless deployments should put
+    the Inductor/Triton caches on persistent storage so later workers reuse the
+    first worker's autotuning artifacts.
     """
     value = os.getenv("JOYOMNI_VAE_COMPILE", "1").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def strict_enabled() -> bool:
+    """Fail startup when an explicitly required compiled path cannot warm."""
+    value = os.getenv("JOYOMNI_VAE_COMPILE_STRICT", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 # Must run before any compiled function executes, so warm restarts reuse the
@@ -28,6 +34,47 @@ _configured: set[int] = set()
 _configured_encode: set[int] = set()
 _configured_encode_dynamic: set[int] = set()
 _skip_notices: set[str] = set()
+_compile_failures: list[str] = []
+
+
+def _warmup_failed(stage: str, exc: BaseException) -> None:
+    message = f"{stage} failed: {exc!r}"
+    _compile_failures.append(message)
+    print(f"[vae_compile] {message}", flush=True)
+    if strict_enabled():
+        raise RuntimeError(message) from exc
+
+
+def runtime_status() -> dict[str, object]:
+    """Return a JSON-safe snapshot used by health checks and launch logs."""
+    ready = (
+        compile_enabled()
+        and len(_configured_encode) >= 2
+        and len(_configured) >= 1
+        and not _compile_failures
+    )
+    return {
+        "enabled": compile_enabled(),
+        "strict": strict_enabled(),
+        "ready": ready,
+        "encode_instances": len(_configured_encode),
+        "decode_instances": len(_configured),
+        "dynamic_encode_instances": len(_configured_encode_dynamic),
+        "failures": list(_compile_failures),
+        "cache": {
+            "torchinductor": os.getenv("TORCHINDUCTOR_CACHE_DIR"),
+            "triton": os.getenv("TRITON_CACHE_DIR"),
+            "cuda": os.getenv("CUDA_CACHE_PATH"),
+        },
+    }
+
+
+def assert_runtime_ready() -> None:
+    """Reject the slow eager path when the deployment requires compilation."""
+    status = runtime_status()
+    if status["ready"]:
+        return
+    raise RuntimeError(f"compiled VAE did not become ready: {status}")
 
 
 def _skip_compile(stage: str) -> bool:
@@ -113,7 +160,7 @@ def warmup_encode(vae, in_channels: int, h_px: int, w_px: int,
                 torch.cuda.synchronize(device)
             print(f"[vae_compile] warmup compiled encode shape (1,{in_channels},{t},{h_px},{w_px}) autocast={autocast}")
         except Exception as exc:  # noqa: BLE001
-            print(f"[vae_compile] encode warmup failed for t={t}: {exc!r}")
+            _warmup_failed(f"encode warmup t={t}", exc)
 
 
 def maybe_setup_encode_dynamic(vae) -> None:
@@ -172,7 +219,7 @@ def warmup_encode_dynamic(vae, in_channels: int, hw_list, device: torch.device,
                     torch.cuda.synchronize(device)
                 n_ok += 1
             except Exception as exc:  # noqa: BLE001
-                print(f"[vae_compile] dynamic encode warmup failed for ({h_px},{w_px},t={t}): {exc!r}")
+                _warmup_failed(f"dynamic encode warmup ({h_px},{w_px},t={t})", exc)
     print(f"[vae_compile] dynamic encode warmup done: {n_ok}/{len(hw_list) * len(temporal_lens)} shapes autocast={autocast}")
 
 
@@ -200,4 +247,4 @@ def warmup_decode(vae, latent_channels: int, h_lat: int, w_lat: int,
                 torch.cuda.synchronize(device)
             print(f"[vae_compile] warmup compiled decode shape (1,{latent_channels},{t},{h_lat},{w_lat}) autocast={autocast}")
         except Exception as exc:  # noqa: BLE001
-            print(f"[vae_compile] warmup failed for t={t}: {exc!r}")
+            _warmup_failed(f"decode warmup t={t}", exc)
