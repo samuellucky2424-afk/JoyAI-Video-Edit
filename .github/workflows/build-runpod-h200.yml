@@ -5,8 +5,7 @@ on:
   push:
     branches:
       - main
-      - agent/reduce-h200-image
-      - agent/fix-runpod-connection-20260817
+      - "agent/**"
     paths:
       - .dockerignore
       - .github/workflows/build-runpod-h200.yml

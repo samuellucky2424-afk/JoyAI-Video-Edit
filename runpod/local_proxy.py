@@ -12,7 +12,7 @@ import asyncio
 import json
 import os
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, WSCloseCode, WSMsgType, web
 
 
 HOP_BY_HOP_HEADERS = {
@@ -61,43 +61,71 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
     await downstream.prepare(request)
 
     session: ClientSession = request.app["session"]
+    upstream = None
     try:
-        async with session.ws_connect(
+        upstream = await session.ws_connect(
             upstream_url(request),
             headers=request.app["auth_headers"],
             heartbeat=30,
             max_msg_size=0,
-        ) as upstream:
+        )
 
-            async def browser_to_runpod() -> None:
-                async for message in downstream:
-                    if message.type == WSMsgType.TEXT:
-                        await upstream.send_str(message.data)
-                    elif message.type == WSMsgType.BINARY:
-                        await upstream.send_bytes(message.data)
-                    elif message.type == WSMsgType.ERROR:
-                        break
+        # The local proxy is intentionally single-viewer. Replacing a stale
+        # browser socket explicitly tells the server to release its session
+        # ticket, avoiding a long queue after a page refresh.
+        async with request.app["websocket_lock"]:
+            previous_upstream = request.app.get("active_upstream")
+            previous_downstream = request.app.get("active_downstream")
+            request.app["active_upstream"] = upstream
+            request.app["active_downstream"] = downstream
 
-            async def runpod_to_browser() -> None:
-                async for message in upstream:
-                    if message.type == WSMsgType.TEXT:
-                        await downstream.send_str(message.data)
-                    elif message.type == WSMsgType.BINARY:
-                        await downstream.send_bytes(message.data)
-                    elif message.type == WSMsgType.ERROR:
-                        break
-
-            tasks = [
-                asyncio.create_task(browser_to_runpod()),
-                asyncio.create_task(runpod_to_browser()),
-            ]
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
+        # Close the replaced pair outside the lock. The old handler also uses
+        # this lock during cleanup, so awaiting its close while holding the
+        # lock would deadlock a page refresh.
+        if previous_upstream is not None and not previous_upstream.closed:
+            try:
+                await previous_upstream.send_json({"type": "stop"})
+            except (ClientError, asyncio.TimeoutError, OSError):
+                pass
+            await previous_upstream.close(
+                code=WSCloseCode.GOING_AWAY,
+                message=b"replaced by a refreshed browser",
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*done, *pending, return_exceptions=True)
+        if previous_downstream is not None and not previous_downstream.closed:
+            await previous_downstream.close(
+                code=WSCloseCode.GOING_AWAY,
+                message=b"replaced by a refreshed browser",
+            )
+
+        async def browser_to_runpod() -> None:
+            async for message in downstream:
+                if message.type == WSMsgType.TEXT:
+                    await upstream.send_str(message.data)
+                elif message.type == WSMsgType.BINARY:
+                    await upstream.send_bytes(message.data)
+                elif message.type == WSMsgType.ERROR:
+                    break
+
+        async def runpod_to_browser() -> None:
+            async for message in upstream:
+                if message.type == WSMsgType.TEXT:
+                    await downstream.send_str(message.data)
+                elif message.type == WSMsgType.BINARY:
+                    await downstream.send_bytes(message.data)
+                elif message.type == WSMsgType.ERROR:
+                    break
+
+        tasks = [
+            asyncio.create_task(browser_to_runpod()),
+            asyncio.create_task(runpod_to_browser()),
+        ]
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*done, *pending, return_exceptions=True)
 
     except (ClientError, asyncio.TimeoutError, OSError) as error:
         if not downstream.closed:
@@ -108,6 +136,17 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
                 }
             )
     finally:
+        if upstream is not None and not upstream.closed:
+            try:
+                await upstream.send_json({"type": "stop"})
+            except (ClientError, asyncio.TimeoutError, OSError):
+                pass
+            await upstream.close()
+        async with request.app["websocket_lock"]:
+            if request.app.get("active_upstream") is upstream:
+                request.app["active_upstream"] = None
+            if request.app.get("active_downstream") is downstream:
+                request.app["active_downstream"] = None
         if not downstream.closed:
             await downstream.close()
 
@@ -117,6 +156,10 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
 async def proxy_http(request: web.Request) -> web.Response:
     session: ClientSession = request.app["session"]
     headers = filtered_headers(request.headers)
+    # Windows PowerShell 5.1 cannot reliably decode Brotli responses. Ask the
+    # upstream load balancer for an identity response so both PowerShell's
+    # readiness probe and the browser receive bytes they can consume directly.
+    headers["Accept-Encoding"] = "identity"
     headers.update(request.app["auth_headers"])
 
     try:
@@ -164,6 +207,9 @@ async def create_session(app: web.Application) -> None:
         # not require the optional Brotli package just to forward RunPod HTML.
         auto_decompress=False,
     )
+    app["websocket_lock"] = asyncio.Lock()
+    app["active_upstream"] = None
+    app["active_downstream"] = None
 
 
 async def close_session(app: web.Application) -> None:

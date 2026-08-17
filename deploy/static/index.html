@@ -162,8 +162,6 @@
     <button type="button" data-lang="en">EN</button>
   </span>
 </div>
-<div class="res-banner" id="resBanner" style="display:none"><span class="res-ico">⚠️</span><span id="resBannerText"></span></div>
-
 <div class="stage">
   <div class="vpanel">
     <div class="vpanel-head">
@@ -171,7 +169,6 @@
       <span class="src-controls">
         <span id="sourceSeg" class="seg" role="tablist">
           <button id="segCamera" type="button" class="on" data-src="camera" data-i18n="seg_camera">摄像头</button>
-          <button id="segMp4" type="button" data-src="mp4">MP4</button>
         </span>
         <input id="videoFile" type="file" accept="video/*" style="display:none" />
       </span>
@@ -192,21 +189,6 @@
     <div class="media-box">
       <img id="outputImg" alt="编辑输出" data-i18n-alt="output_img_alt" />
       <canvas id="outputCanvas" style="display:none"></canvas>
-      <video id="outputResult" playsinline controls style="display:none; position:absolute; inset:0; z-index:4;"></video>
-      <button id="downloadBubble" type="button" class="download-bubble" style="display:none" data-i18n="download_done">✨ 编辑完成 · 下载</button>
-      <div id="outputIdleOverlay" class="overlay">
-        <div class="idle-ico">✨</div>
-        <div class="hint" data-i18n="wait_edit_cmd">等待编辑指令</div>
-      </div>
-      <div id="outputWaitOverlay" class="overlay wait-overlay" style="display:none">
-        <div id="outputWaitIco" class="idle-ico">👤</div>
-        <div id="outputWaitHint" class="hint" data-i18n="face_camera">请正对摄像头</div>
-      </div>
-      <div id="outputStartOverlay" class="overlay wait-overlay" style="display:none">
-        <div class="idle-ico spin">⏳</div>
-        <div id="outputStartHint" class="hint" data-i18n="busy_starting">正在启动</div>
-      </div>
-      <div id="outputToast" class="toast"></div>
     </div>
     <div id="stageTimingsPanel" class="stage-timings-wrap" style="display:none">
       <div class="st-title" data-i18n="prof_title">性能分析（各阶段耗时 · 开启会略降性能）</div>
@@ -241,9 +223,9 @@
     <span class="kvreset-field keep-min">
       <span data-i18n="upload_quality">上传清晰度</span>
       <span id="upqTier" class="qtier">
-        <button type="button" data-upq="0.2" data-i18n="q_low">低</button>
+        <button type="button" data-upq="0.2" class="on" data-i18n="q_low">低</button>
         <button type="button" data-upq="0.4" data-i18n="q_mid">中</button>
-        <button type="button" data-upq="0.6" class="on" data-i18n="q_high">高</button>
+        <button type="button" data-upq="0.6" data-i18n="q_high">高</button>
       </span>
     </span>
     <span class="kvreset-field keep-min">
@@ -262,9 +244,9 @@
         <button type="button" data-fps="32">32</button>
         <button type="button" data-fps="30">30</button>
         <button type="button" data-fps="28">28</button>
-        <button type="button" data-fps="24" class="on">24</button>
+        <button type="button" data-fps="24">24</button>
         <button type="button" data-fps="20">20</button>
-        <button type="button" data-fps="16">16</button>
+        <button type="button" data-fps="16" class="on">16</button>
         <button type="button" data-fps="12">12</button>
         <button type="button" data-fps="8">8</button>
       </span>
@@ -284,11 +266,11 @@
     <div><input id="height" type="number" value="480" /></div>
   </div>
   <div class="row">
-    <div><input id="cameraFps" type="number" value="24" min="1" max="60" /></div>
-    <div><input id="fps" type="number" value="24" min="1" max="32" /></div>
+    <div><input id="cameraFps" type="number" value="16" min="1" max="60" /></div>
+    <div><input id="fps" type="number" value="16" min="1" max="32" /></div>
   </div>
   <div class="row">
-    <div><input id="quality" type="number" value="0.6" min="0.1" max="1" step="0.01" /></div>
+    <div><input id="quality" type="number" value="0.2" min="0.1" max="1" step="0.01" /></div>
   </div>
   <input id="steps" type="number" value="2" min="1" max="8" />
   <label><input id="smoothPlayback" type="checkbox" checked /> <span data-i18n="smooth_playback">平滑输出播放</span></label>
@@ -349,7 +331,7 @@ const I18N = {
     gate_off_center: "请把脸移到画面中间",
     pe_running: "画面就绪，正在增强提示词",
     stage_pil: "PIL→张量", stage_vae_enc: "VAE 编码", stage_dit: "DiT 去噪",
-    stage_kv: "KV cache", stage_vae_dec: "VAE 解码", stage_jpeg: "JPEG 解码",
+    stage_kv: "KV cache", stage_vae_dec: "VAE 解码", stage_jpeg: "JPEG 解码", stage_h264: "H264 编码",
     stage_q_enc: "排队·编码", stage_q_dit: "排队·DiT", stage_q_dec: "排队·解码",
     stage_q_pseudo: "排队·伪编码", stage_q_post: "排队·后处理",
     stage_ws: "WS 发送", stage_total: "服务端合计", stage_residence: "服务端驻留",
@@ -410,7 +392,7 @@ const I18N = {
     gate_off_center: "Move your face to the center",
     pe_running: "Frame ready, enhancing the prompt",
     stage_pil: "PIL→Tensor", stage_vae_enc: "VAE encode", stage_dit: "DiT denoise",
-    stage_kv: "KV cache", stage_vae_dec: "VAE decode", stage_jpeg: "JPEG decode",
+    stage_kv: "KV cache", stage_vae_dec: "VAE decode", stage_jpeg: "JPEG decode", stage_h264: "H264 encode",
     stage_q_enc: "Queue·encode", stage_q_dit: "Queue·DiT", stage_q_dec: "Queue·decode",
     stage_q_pseudo: "Queue·pseudo", stage_q_post: "Queue·post",
     stage_ws: "WS send", stage_total: "Server total", stage_residence: "Server residence",
@@ -941,6 +923,9 @@ function renderStageTimings() {
   push(t("stage_dit"), "dit_denoise_s", "accent");
   push(t("stage_kv"), "kv_store_s");
   push(t("stage_vae_dec"), "vae_decode_s");
+  if (Number.isFinite(Number(p.h264_encode_s))) {
+    cards.push(statCell(t("stage_h264"), fmt(Number(p.h264_encode_s) * 1000, "ms")));
+  }
   push(t("stage_q_enc"), "q_wait_encode_s");
   push(t("stage_q_dit"), "q_wait_dit_s");
   push(t("stage_q_dec"), "q_wait_decode_s");
@@ -1153,10 +1138,11 @@ function trimOutputQueueForLatency() {
 }
 
 let h264DecodeOk = false;
+let h264DecodeReady = Promise.resolve(false);
 if (typeof VideoDecoder !== "undefined") {
-  VideoDecoder.isConfigSupported({ codec: "avc1.640028", optimizeForLatency: true })
-    .then((s) => { h264DecodeOk = !!(s && s.supported); })
-    .catch(() => {});
+  h264DecodeReady = VideoDecoder.isConfigSupported({ codec: "avc1.640028", optimizeForLatency: true })
+    .then((s) => { h264DecodeOk = !!(s && s.supported); return h264DecodeOk; })
+    .catch(() => false);
 }
 let outCodecH264 = false;
 let outDecoder = null;
@@ -1605,6 +1591,7 @@ function stopVideoPull() { videoPullActive = false; }
 
 async function beginSession() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  h264DecodeOk = await h264DecodeReady;
   resetRunMetrics();
   pePausedSend = false;
   clearResultVideo();
@@ -2555,7 +2542,7 @@ if (upqTierEl) {
 const Q_TIERS = [20, 40, 60];
 const downQualityUi = document.getElementById("downQualityUi");
 const qtierEl = document.getElementById("qtier");
-let autoQTier = 2;
+let autoQTier = 0;
 let autoQLowStreak = 0;
 let autoQHoldTicks = 0;
 function sendOutputQuality(v) {
@@ -2702,6 +2689,7 @@ window.addEventListener("load", () => {
     showCameraOverlay(true);
   });
 });
+window.addEventListener("pagehide", () => stopActiveRun());
 </script>
 </body>
 </html>

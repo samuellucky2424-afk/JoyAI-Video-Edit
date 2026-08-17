@@ -426,7 +426,6 @@ class _SegmentedRecorder:
         self.frames_written = 0
         self.frames_dropped_recording = 0
         self.segments = 0
-        self.last_error: str | None = None
         self._started = False
 
     def start(self) -> None:
@@ -510,8 +509,7 @@ class _SegmentedRecorder:
     def _run(self) -> None:
         try:
             import av
-        except Exception as exc:
-            self.last_error = f"pyav import failed: {exc!r}"
+        except Exception:
             return
         output = stream = None
         time_base = Fraction(1, 1000)
@@ -614,7 +612,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         yield
 
     app = FastAPI(lifespan=lifespan)
-    app.state.args = args
     app.state.runtime = None
     app.state.runtime_lock = threading.Lock()
     app.state.inference_lock = threading.Lock()
@@ -789,7 +786,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         output_quality = 60 if args.output_quality == "auto" else int(args.output_quality)
         output_codec = "mjpeg"
         h264_stream: _H264Stream | None = None
-        input_codec = "mjpeg"
         h264_ingest: _H264Ingest | None = None
         input_sniffed = False
         max_temporal_ids = args.max_temporal_ids
@@ -802,7 +798,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         stop_output_pump = asyncio.Event()
         output_task: asyncio.Task[None] | None = None
 
-        flow = {"recv": None, "rtt": None, "at": 0.0, "dropped": 0, "congested": False,
+        flow = {"recv": None, "at": 0.0, "dropped": 0, "congested": False,
                 "base": 0, "has_ack": False, "probe": 0, "clamped": False,
                 "skew_min": None, "skew_at": 0.0, "up_ms": 0.0,
                 "consec": 0}
@@ -1555,12 +1551,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 flow["at"] = time.time()
                             except (TypeError, ValueError):
                                 pass
-                        _rtt = payload.get("rtt")
-                        if _rtt is not None:
-                            try:
-                                flow["rtt"] = float(_rtt)
-                            except (TypeError, ValueError):
-                                pass
                         _up_ms = None
                         _t = payload.get("t")
                         if _t is not None:
@@ -1628,11 +1618,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     _annexb_magic = frame_bytes[:4] == b"\x00\x00\x00\x01" or frame_bytes[:3] == b"\x00\x00\x01"
                     if _jpeg_magic and h264_ingest is not None:
                         h264_ingest = None
-                        input_codec = "mjpeg"
                         print("#####[STREAM] uplink sniffed JPEG -> input_codec=mjpeg", flush=True)
                     elif _annexb_magic and h264_ingest is None and _up_allow:
                         h264_ingest = _H264Ingest()
-                        input_codec = "h264"
                         print("#####[STREAM] uplink sniffed H.264 -> input_codec=h264", flush=True)
 
                 uplink_frame: Image.Image | None = None

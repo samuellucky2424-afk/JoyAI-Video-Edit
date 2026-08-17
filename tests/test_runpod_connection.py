@@ -56,9 +56,14 @@ class RunPodConnectionContractTests(unittest.TestCase):
         text = (ROOT / "runpod" / "Start-JoyAI-Realtime-Test.ps1").read_text()
         self.assertIn("while (-not $workerReady", text)
         self.assertIn("timed out waiting for worker", text)
+        self.assertIn("operation has timed out", text)
         self.assertIn("$retryableStatusCodes", text)
         self.assertIn("$WarmTimeoutSeconds", text)
         self.assertIn("does not guarantee that GPU billing has stopped", text)
+
+    def test_windows_script_reports_local_proxy_failures(self):
+        text = (ROOT / "runpod" / "Start-JoyAI-Realtime-Test.ps1").read_text()
+        self.assertIn("Local proxy check $attempt failed: $localDetail", text)
 
     def test_windows_script_opens_browser_only_after_local_health_is_ready(self):
         text = (ROOT / "runpod" / "Start-JoyAI-Realtime-Test.ps1").read_text()
@@ -70,16 +75,34 @@ class RunPodConnectionContractTests(unittest.TestCase):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
         self.assertIn('request.path == "/ws"', text)
         self.assertNotIn('api.runpod.ai/ping', text)
+        self.assertIn('await previous_upstream.send_json({"type": "stop"})', text)
+        self.assertIn('message=b"replaced by a refreshed browser"', text)
 
     def test_proxy_relays_brotli_without_a_python_decoder(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
         self.assertIn("auto_decompress=False", text)
+        self.assertIn('headers["Accept-Encoding"] = "identity"', text)
 
     def test_proxy_suppresses_only_windows_cleanup_resets(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
         self.assertIn("proxy_exception_handler", text)
         self.assertIn('getattr(error, "winerror", None) == 10054', text)
         self.assertIn('"_call_connection_lost" in message', text)
+
+    def test_h200_live_mode_disables_recording_and_uses_low_bandwidth_defaults(self):
+        dockerfile = (ROOT / "Dockerfile.h200").read_text()
+        launcher = (ROOT / "deploy" / "run_server.sh").read_text()
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn("JOYOMNI_RECORD_ENABLED=0", dockerfile)
+        self.assertIn("JOYOMNI_ONLINE_GATE_ENABLED=0", dockerfile)
+        self.assertIn("JOYOMNI_FPS=16", dockerfile)
+        self.assertIn('EXTRA_ARGS+=(--record-dir "$RECORD_DIR")', launcher)
+        self.assertNotIn('  --record-dir "$RECORD_DIR" \\\n', launcher)
+        self.assertNotIn('id="downloadBubble"', html)
+        self.assertNotIn('id="outputStartOverlay"', html)
+        self.assertIn('data-upq="0.2" class="on"', html)
+        self.assertIn('data-fps="16" class="on"', html)
+        self.assertIn("let autoQTier = 0;", html)
 
 
 if __name__ == "__main__":
