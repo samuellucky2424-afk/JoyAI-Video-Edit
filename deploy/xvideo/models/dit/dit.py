@@ -797,6 +797,38 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             if evict_ids:
                 self._kv_cache_generation += 1
 
+    def scale_kv_cache_values(
+        self,
+        chunk_id: int,
+        scale: float,
+        *,
+        scope: str = "cond",
+    ) -> None:
+        """Strengthen one cached conditioning chunk without changing cache shape.
+
+        This is used by the optional RV2V identity-lock mode.  Scaling only the
+        cached values preserves attention logits and CUDA-graph tensor shapes,
+        while increasing the reference chunk's contribution relative to the
+        generated-history chunks.
+        """
+        self._ensure_kv_cache_state()
+        scale = float(scale)
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("KV cache value scale must be a finite positive number")
+        if scale == 1.0:
+            return
+        chunk_store = self._inference_kv_cache.get(scope, {}).get(chunk_id)
+        if not chunk_store:
+            raise RuntimeError(
+                f"cannot scale missing KV cache chunk {chunk_id!r} in scope {scope!r}"
+            )
+        for entry in chunk_store.values():
+            entry["value"].mul_(scale)
+        self._kv_cache_generation += 1
+        self._kv_assembly_version = None
+        self._kv_assembly_cache = {}
+        self._kv_assembly_freqs = None
+
     def get_rotary_pos_embed_from_ids(
         self,
         *,
