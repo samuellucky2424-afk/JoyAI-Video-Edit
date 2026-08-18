@@ -92,6 +92,14 @@ finalization are disabled, the presence gate is off, and the browser starts at
 proves stable. Refreshing the browser replaces the previous WebSocket session
 instead of waiting behind its stale session ticket.
 
+When a reference image is attached, the browser enables the experimental
+**Identity Lock** option. It keeps the official RV2V reference path and scales
+the cached reference values by `1.5` relative to generated-history values. The
+server clamps the scale to `1.0..2.0`, ignores it without a reference image, and
+does not change KV-cache shapes, so the CUDA-graph fast path remains eligible.
+This can reduce reference drift but is not a biometric face-swap guarantee;
+disable the option if it causes over-conditioning or visual artifacts.
+
 The proxy records the `X-Runpod-Worker-Id` returned by the initial local health
 check and uses it as a soft preference for page and asset requests. Keep
 `Max workers` at `1` during one-viewer testing so the unblocked WebSocket route
