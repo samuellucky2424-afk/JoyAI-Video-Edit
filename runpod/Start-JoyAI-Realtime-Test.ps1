@@ -116,6 +116,18 @@ try {
 
     Write-Host "JoyAI runtime is ready after $([int]$warmTimer.Elapsed.TotalSeconds) seconds."
     if (
+        $null -eq $health.checkpoint -or
+        $health.checkpoint.status -ne "current"
+    ) {
+        $checkpointStatus = if ($null -eq $health.checkpoint) {
+            "missing from the health response"
+        } else {
+            [string]$health.checkpoint.status
+        }
+        throw "The upgraded RV2V checkpoint was not verified ($checkpointStatus). Stop this worker. Verify the mounted volume with: python3 /opt/joyai/runpod/verify_checkpoint.py --full-hash"
+    }
+    Write-Host "Verified: the upgraded RV2V checkpoint is active."
+    if (
         $null -eq $health.optimizations -or
         -not $health.optimizations.vae_compile.ready -or
         -not $health.optimizations.cuda_graph.ready
