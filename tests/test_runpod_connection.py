@@ -204,6 +204,8 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 200;", html)
         self.assertIn("const MAX_BACKEND_PENDING_FRAMES = 16;", html)
         self.assertIn("const UPLINK_KEYFRAME_INTERVAL = 20;", html)
+        self.assertIn("const IDENTITY_UPLINK_KEYFRAME_INTERVAL = 4;", html)
+        self.assertIn("const IDENTITY_UPLINK_BITRATE_MULTIPLIER = 1.5;", html)
         self.assertIn('autoQuality = true; autoQTier = 0;', html)
 
     def test_reference_initialization_is_not_cancelled_by_live_frame_guard(self):
@@ -233,9 +235,14 @@ class RunPodConnectionContractTests(unittest.TestCase):
 
         self.assertIn('id="identityLock"', html)
         self.assertIn("identity_lock: identityLock", html)
+        self.assertIn("identityFidelityMode = identityLock", html)
+        self.assertIn("seq % keyframeInterval === 0", html)
         self.assertIn("reference_kv_scale: identityLock ? 1.35 : 1.0", html)
         self.assertIn("kv_reset_frames: identityLock ? 0", html)
         self.assertIn('payload.get("identity_lock", False)', server)
+        self.assertIn("#####[IDENTITY-PROMPT] appended skin and expression fidelity directive", server)
+        self.assertIn("including the face, neck, arms, and hands", server)
+        self.assertIn("facial expression, eye motion, mouth shape", server)
         self.assertIn("1.35 if identity_lock else 1.0", server)
         self.assertIn("max(1.0, min(1.5, reference_kv_scale))", server)
         self.assertIn("if identity_lock:\n                            kv_reset_frames = 0", server)
@@ -331,7 +338,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('label_en: "Reference Image"', html)
         self.assertIn('title_en: "My Reference Person"', html)
         self.assertIn(
-            "Preserve the source pose, facial expression, lip movements, and motion.",
+            "Preserve the source pose, facial expression, eye motion, mouth shape, lip movements, and body motion.",
             html,
         )
 

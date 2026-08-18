@@ -1383,6 +1383,22 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             await _send_json({"type": "error", "message": f"failed to decode ref image: {exc!r}"})
                             continue
                         identity_lock = bool(payload.get("identity_lock", False)) and ref_image is not None
+                        if identity_lock:
+                            # Keep this directive server-side so bookmarked or
+                            # cached browser clients that still send the older
+                            # one-line identity prompt receive the same fidelity
+                            # treatment.  This asks the RV2V model to transfer
+                            # reference appearance across visible skin while
+                            # explicitly retaining the source performance.
+                            identity_directive = (
+                                "Use the reference person's identity, facial appearance, and natural skin tone "
+                                "consistently on all visible skin, including the face, neck, arms, and hands. "
+                                "Preserve the source video's pose, facial expression, eye motion, mouth shape, "
+                                "lip movements, and body motion."
+                            )
+                            if identity_directive not in session_prompt:
+                                session_prompt = f"{session_prompt.strip()} {identity_directive}".strip()
+                                print("#####[IDENTITY-PROMPT] appended skin and expression fidelity directive", flush=True)
                         try:
                             reference_kv_scale = float(
                                 payload.get(

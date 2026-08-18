@@ -1188,6 +1188,12 @@ const outMetaByTs = new Map();
 let upCodecH264 = false;
 let upEncoder = null;
 const UPLINK_KEYFRAME_INTERVAL = 20;
+// Identity replacement is unusually sensitive to inter-frame smearing around
+// the eyes and mouth. Refresh the source image more often without switching
+// every session to the much heavier MJPEG uplink.
+const IDENTITY_UPLINK_KEYFRAME_INTERVAL = 4;
+const IDENTITY_UPLINK_BITRATE_MULTIPLIER = 1.5;
+let identityFidelityMode = false;
 let upSeq = 0;
 const upPendingByTs = new Map();
 
@@ -1200,7 +1206,8 @@ function effectiveUpQuality() {
 
 function upEncoderBitrate(width, height) {
   const REF_PX = 1248 * 720;
-  const REF_BITRATE = (effectiveUpQuality() || 0.4) * 4000000 * upDrainFactor;
+  const identityMultiplier = identityFidelityMode ? IDENTITY_UPLINK_BITRATE_MULTIPLIER : 1.0;
+  const REF_BITRATE = (effectiveUpQuality() || 0.4) * 4000000 * upDrainFactor * identityMultiplier;
   const REF_FPS = 16;
   return Math.round(REF_BITRATE * (width * height / REF_PX) * Math.sqrt(sendTargetFps() / REF_FPS));
 }
@@ -1323,7 +1330,10 @@ function encodeUplinkFrame(width, height) {
     upResumeKeyframe = false;
   }
   const vf = new VideoFrame(capture, { timestamp: seq });
-  upEncoder.encode(vf, { keyFrame: forceKey || seq === 1 || seq % UPLINK_KEYFRAME_INTERVAL === 0 });
+  const keyframeInterval = identityFidelityMode
+    ? IDENTITY_UPLINK_KEYFRAME_INTERVAL
+    : UPLINK_KEYFRAME_INTERVAL;
+  upEncoder.encode(vf, { keyFrame: forceKey || seq === 1 || seq % keyframeInterval === 0 });
   vf.close();
 }
 
@@ -1648,6 +1658,7 @@ async function beginSession() {
   suppressPeThisSend = false;
   const usePe = !peSuppressed && !refImage && document.getElementById("usePe").checked;
   const identityLock = !!refImage && document.getElementById("identityLock").checked;
+  identityFidelityMode = identityLock;
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
   const cacheKey = peCacheKey(rawPrompt, refImage);
@@ -2101,7 +2112,7 @@ const PROMPT_GROUPS = [
     key: "ref_tryon",
     label: "参考图编辑", label_en: "Reference Image",
     cases: [
-      { title: "我的参考人物", title_en: "My Reference Person", desc: "用上传图片中的人物替换主角", desc_en: "Replace the subject with your uploaded person", text: "使用参考图中人物的身份和外观。保留源视频的姿势、表情、口型和动作。", text_en: "Use the reference person's identity and appearance. Preserve the source pose, facial expression, lip movements, and motion." },
+      { title: "我的参考人物", title_en: "My Reference Person", desc: "用上传图片中的人物替换主角", desc_en: "Replace the subject with your uploaded person", text: "使用参考人物的身份、面部外观和自然肤色，并将肤色一致地应用于脸、颈部、手臂和手等所有可见皮肤。保留源视频的姿势、面部表情、眼神、口型、嘴唇动作和身体动作。", text_en: "Use the reference person's identity, facial appearance, and natural skin tone consistently on all visible skin, including the face, neck, arms, and hands. Preserve the source pose, facial expression, eye motion, mouth shape, lip movements, and body motion." },
       { title: "NY 棒球帽", title_en: "NY Cap", desc: "戴上参考图里的黑色 NY 棒球帽", desc_en: "Black NY cap from the reference image", ref: "hat", text: "将参考图中的黑色 NY 棒球帽戴到主角头上，帽子正面朝前。", text_en: "Put the black NY baseball cap from the reference image on the subject's head, facing forward." },
       { title: "红色围巾", title_en: "Red Scarf", desc: "围上参考图里的红色流苏围巾", desc_en: "Red tasseled scarf from the reference image", ref: "scarf", text: "将参考图中的红色流苏围巾围到主角的颈部。", text_en: "Wrap the red tasseled scarf from the reference image around the subject's neck." },
       { title: "粉色T恤", title_en: "Pink Tee", desc: "换上参考图里的粉色短袖 T 恤", desc_en: "Pink short-sleeve tee from the reference image", ref: "pink_tee", text: "将主角的衣服换成参考图里的粉色短袖 T 恤。", text_en: "Replace the subject's clothing with the pink short-sleeve T-shirt from the reference image." },
