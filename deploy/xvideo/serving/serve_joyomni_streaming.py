@@ -5,6 +5,7 @@ import asyncio
 import base64
 import io
 import json
+import math
 import os
 import queue
 import sys
@@ -1381,6 +1382,29 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         except Exception as exc:
                             await _send_json({"type": "error", "message": f"failed to decode ref image: {exc!r}"})
                             continue
+                        identity_lock = bool(payload.get("identity_lock", False)) and ref_image is not None
+                        try:
+                            reference_kv_scale = float(
+                                payload.get(
+                                    "reference_kv_scale",
+                                    1.5 if identity_lock else 1.0,
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            await _send_json({
+                                "type": "error",
+                                "message": "reference_kv_scale must be a number",
+                            })
+                            continue
+                        if not math.isfinite(reference_kv_scale):
+                            await _send_json({
+                                "type": "error",
+                                "message": "reference_kv_scale must be finite",
+                            })
+                            continue
+                        reference_kv_scale = max(1.0, min(2.0, reference_kv_scale))
+                        if not identity_lock:
+                            reference_kv_scale = 1.0
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
                         output_quality = max(1, min(100, int(payload.get("output_quality", output_quality))))
                         lossless_mode = str(payload.get("source", "")) == "file"
@@ -1493,6 +1517,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             static_diff_thresh=static_diff_thresh,
                             profile_timings=bool(payload.get("profile_timings", args.profile_timings)),
                             output_codec=output_codec,
+                            reference_kv_scale=reference_kv_scale,
                         )
 
                         print("#####[RESTART] creating new session", flush=True)
@@ -1510,6 +1535,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ws_debug["kv_reset_count"] = reset_count
                         ws_debug["frames_since_session_reset"] = frames_since_session_reset
                         ws_debug["has_ref_image"] = ref_image is not None
+                        ws_debug["identity_lock"] = identity_lock
+                        ws_debug["reference_kv_scale"] = reference_kv_scale
                         ws_debug["last_message_type"] = "start"
                         await _send_json(
                             {
@@ -1520,6 +1547,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "output_codec": output_codec,
                                 "input_codec": input_codec,
                                 "ref_image": ref_image is not None,
+                                "identity_lock": identity_lock,
+                                "reference_kv_scale": reference_kv_scale,
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,
                                 "pe_model": args.pe_model or DEFAULT_PE_MODEL,
