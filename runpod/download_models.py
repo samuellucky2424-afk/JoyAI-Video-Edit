@@ -5,6 +5,9 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 
+JOYAI_RV2V_REVISION = "eda14f342ef99c52485bbb8dc271c29b42298089"
+
+
 checkpoint_root = Path(
     os.getenv(
         "JOYOMNI_CKPT_ROOT",
@@ -20,6 +23,7 @@ print("Downloading JoyAI 0811 model and VAE...")
 
 snapshot_download(
     repo_id="jdopensource/JoyAI-Video-Edit",
+    revision=JOYAI_RV2V_REVISION,
     local_dir=checkpoint_root / "JoyAI-Video-Edit",
     allow_patterns=[
         "dit/joyai_video_edit_dit_0811.pth",
