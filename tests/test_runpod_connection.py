@@ -206,6 +206,27 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("const UPLINK_KEYFRAME_INTERVAL = 20;", html)
         self.assertIn('autoQuality = true; autoQTier = 0;', html)
 
+    def test_reference_identity_lock_is_wired_end_to_end(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        pipeline = (ROOT / "deploy" / "xvideo" / "models" / "pipeline.py").read_text()
+        dit = (ROOT / "deploy" / "xvideo" / "models" / "dit" / "dit.py").read_text()
+
+        self.assertIn('id="identityLock"', html)
+        self.assertIn("identity_lock: identityLock", html)
+        self.assertIn("reference_kv_scale: identityLock ? 1.5 : 1.0", html)
+        self.assertIn('payload.get("identity_lock", False)', server)
+        self.assertIn("reference_kv_scale=reference_kv_scale", server)
+        self.assertIn("reference_kv_scale: float = 1.0", runtime)
+        self.assertIn("reference_kv_scale=self.settings.reference_kv_scale", runtime)
+        self.assertIn("model.scale_kv_cache_values(", pipeline)
+        self.assertIn("def scale_kv_cache_values(", dit)
+
     def test_health_reports_required_runtime_optimizations(self):
         server = (
             ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
