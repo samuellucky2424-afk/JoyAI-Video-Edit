@@ -396,6 +396,7 @@ class Pipeline(DiffusionPipeline):
         prompt_embeds: torch.Tensor,
         reference_image_latents: torch.Tensor,
         transformer_dtype: torch.dtype,
+        reference_kv_scale: float = 1.0,
     ) -> None:
         ref_img = reference_image_latents.to(device=self._execution_device, dtype=transformer_dtype)
         ref_frames = ref_img.shape[2]
@@ -412,6 +413,11 @@ class Pipeline(DiffusionPipeline):
                 self_attn_input_mode=SELF_ATTN_MODE_REF_IMAGE_CACHE,
                 skip_text_stream=True,
             )
+        model.scale_kv_cache_values(
+            self._kv_cache_memory_id("ref_image"),
+            reference_kv_scale,
+            scope="cond",
+        )
 
     def _store_clean_chunk_kv_cache(
         self,
