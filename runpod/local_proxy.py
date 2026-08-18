@@ -146,7 +146,11 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
         upstream = await session.ws_connect(
             upstream_url(request),
             headers=upstream_headers(request.app, affinity=False),
-            heartbeat=10,
+            # The browser already sends an application-level JSON ping every
+            # second. A protocol heartbeat adds a second liveness mechanism
+            # that can falsely close with code 1006 when RunPod's load
+            # balancer does not relay a Pong during graph/session rebuilds.
+            heartbeat=None,
             max_msg_size=0,
         )
         response = getattr(upstream, "_response", None)
