@@ -278,7 +278,7 @@
     <div><input id="targetQueueDelayMs" type="number" value="100" min="0" max="5000" step="50" /></div>
     <div><input id="maxQueueDelayMs" type="number" value="200" min="0" max="8000" step="50" /></div>
   </div>
-  <input id="kvResetFrames" type="number" value="1080" min="0" step="1" />
+  <input id="kvResetFrames" type="number" value="0" min="0" step="1" />
   <label><input id="useMaxTemporalIds" type="checkbox" checked /> <span data-i18n="max_temporal">最大时序 ID</span></label>
   <div id="maxTemporalIdsWrap"><input id="maxTemporalIds" type="number" value="8" min="1" step="1" /></div>
   <label><input id="freezeKvOnStatic" type="checkbox" /> <span data-i18n="freeze_kv">静止时冻结 KV</span></label>
@@ -1684,7 +1684,10 @@ async function beginSession() {
     reference_kv_scale: identityLock ? 1.5 : 1.0,
     gate_enabled: faceGateDebugEnabled(),
     seed: SERVER_DEFAULTS.seed,
-    kv_reset_frames: Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
+    // A hard KV/session reset discards the generated identity history and can
+    // cause a visible person change when the stream starts again. Keep the
+    // continuously cached RV2V reference alive for the full locked session.
+    kv_reset_frames: identityLock ? 0 : Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
     output_quality: Number(downQualityUi.value),
     fps: sendTargetFps(),
     output_codec: h264DecodeOk ? "h264" : "mjpeg",
@@ -1988,7 +1991,10 @@ async function start() {
     startingRun = false;
     sessionGranted = false;
     setSendBusy(false, t("busy_disconnected"));
-    showOutputIdle(true);
+    // Keep the last successfully decoded result visible while the background
+    // reconnect runs. Replacing it with the idle panel makes a brief RunPod or
+    // local-DNS interruption look like the identity/output disappeared.
+    showOutputIdle(!(streamingWanted && receivedFrames > 0));
     updateMetrics();
     scheduleReconnect();
   };

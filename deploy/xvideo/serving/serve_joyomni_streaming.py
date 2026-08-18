@@ -1406,6 +1406,15 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         if not identity_lock:
                             reference_kv_scale = 1.0
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
+                        # The reference KV is the long-lived identity anchor.
+                        # Resetting the entire session drops both the generated
+                        # history and that anchor, causing a visible identity
+                        # discontinuity when the new session initializes. The
+                        # sliding temporal-ID window already bounds positions,
+                        # so an identity-locked RV2V session must not use the
+                        # legacy periodic hard reset.
+                        if identity_lock:
+                            kv_reset_frames = 0
                         output_quality = max(1, min(100, int(payload.get("output_quality", output_quality))))
                         lossless_mode = str(payload.get("source", "")) == "file"
                         _up_allow = args.uplink_codec == "auto" and not lossless_mode
@@ -2099,7 +2108,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Downlink transport. 'auto' honors browser h264 (saves bandwidth; display-only, does not affect generated identity). 'mjpeg' forces JPEG. Default auto.")
     parser.add_argument("--prompt", type=str, default="Keep the person and scene temporally consistent while applying the requested edit.")
     parser.add_argument("--profile-timings", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--kv-reset-frames", type=int, default=1080)
+    parser.add_argument("--kv-reset-frames", type=int, default=0)
     parser.add_argument("--max-temporal-ids", type=int, default=None)
     parser.add_argument("--freeze-kv-on-static", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--static-diff-thresh", type=float, default=0.5)

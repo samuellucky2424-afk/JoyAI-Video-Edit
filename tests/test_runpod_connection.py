@@ -220,7 +220,9 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('id="identityLock"', html)
         self.assertIn("identity_lock: identityLock", html)
         self.assertIn("reference_kv_scale: identityLock ? 1.5 : 1.0", html)
+        self.assertIn("kv_reset_frames: identityLock ? 0", html)
         self.assertIn('payload.get("identity_lock", False)', server)
+        self.assertIn("if identity_lock:\n                            kv_reset_frames = 0", server)
         self.assertIn("reference_kv_scale=reference_kv_scale", server)
         self.assertIn("reference_kv_scale: float = 1.0", runtime)
         self.assertIn("reference_kv_scale=self.settings.reference_kv_scale", runtime)
@@ -285,6 +287,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("scheduleReconnect();", html)
         self.assertIn("streamingWanted = false;\n  cancelReconnect();", html)
         self.assertIn("streamingWanted = true;\n  await start();", html)
+        self.assertIn("showOutputIdle(!(streamingWanted && receivedFrames > 0));", html)
 
     def test_proxy_reports_websocket_close_codes(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
@@ -332,6 +335,13 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('f"{app[\'upstream\']}/health"', text)
         self.assertIn("asyncio.create_task(keep_worker_active(request.app))", text)
         self.assertIn("keepalive_task.cancel()", text)
+
+    def test_proxy_caches_runpod_dns_for_live_session_continuity(self):
+        text = (ROOT / "runpod" / "local_proxy.py").read_text()
+        self.assertIn("TCPConnector(", text)
+        self.assertIn("use_dns_cache=True", text)
+        self.assertIn("ttl_dns_cache=600", text)
+        self.assertIn("keepalive_timeout=30", text)
 
     def test_runpod_settings_limit_one_viewer_tests_to_one_worker(self):
         text = (ROOT / "runpod" / "README.md").read_text()

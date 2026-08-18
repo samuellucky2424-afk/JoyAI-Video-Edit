@@ -97,8 +97,16 @@ When a reference image is attached, the browser enables the experimental
 the cached reference values by `1.5` relative to generated-history values. The
 server clamps the scale to `1.0..2.0`, ignores it without a reference image, and
 does not change KV-cache shapes, so the CUDA-graph fast path remains eligible.
+Identity-locked sessions also disable the legacy periodic hard KV reset. That
+reset used to run after 1,080 input frames (about 54 seconds at 20 FPS), discard
+the active identity history, and visibly restart the generated person.
 This can reduce reference drift but is not a biometric face-swap guarantee;
 disable the option if it causes over-conditioning or visual artifacts.
+
+The Windows proxy caches the resolved RunPod address for ten minutes. This
+reduces repeated OS DNS lookups during keepalives and reconnects; a failed local
+DNS lookup was observed as `getaddrinfo failed` during a live stream. The last
+decoded result remains visible while an unexpected WebSocket reconnect runs.
 
 The proxy records the `X-Runpod-Worker-Id` returned by the initial local health
 check and uses it as a soft preference for page and asset requests. Keep
