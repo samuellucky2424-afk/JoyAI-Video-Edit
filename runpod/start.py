@@ -4,6 +4,14 @@ import sys
 from pathlib import Path
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+DEPLOY_ROOT = REPOSITORY_ROOT / "deploy"
+if str(DEPLOY_ROOT) not in sys.path:
+    sys.path.insert(0, str(DEPLOY_ROOT))
+
+from xvideo.checkpoint_status import checkpoint_status
+
+
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -55,7 +63,7 @@ def build_model_command(repository_root: Path, *, preload: bool) -> list[str]:
 
 
 def main() -> int:
-    repository_root = Path(__file__).resolve().parents[1]
+    repository_root = REPOSITORY_ROOT
     checkpoint_root = Path(
         os.getenv(
             "JOYOMNI_CKPT_ROOT",
@@ -83,6 +91,34 @@ def main() -> int:
             flush=True,
         )
         return 1
+
+    dit_checkpoint = required_checkpoint_items(checkpoint_root)[0]
+    dit_status = checkpoint_status(dit_checkpoint)
+    status = dit_status["status"]
+    print(
+        "JoyAI RV2V checkpoint status: "
+        f"{status} ({dit_status['verification']}).",
+        flush=True,
+    )
+    if status == "stale":
+        print(
+            "The mounted volume contains a different 0811 DiT than the "
+            "upgraded RV2V release. Refusing to load stale weights.",
+            flush=True,
+        )
+        print(
+            "Update the volume with: "
+            "python3 /opt/joyai/runpod/download_models.py",
+            flush=True,
+        )
+        return 1
+    if status == "unknown":
+        print(
+            "Hugging Face metadata is unavailable, so this checkpoint cannot "
+            "be identified without a one-time full hash. Run: "
+            "python3 /opt/joyai/runpod/verify_checkpoint.py --full-hash",
+            flush=True,
+        )
 
     environment = os.environ.copy()
 
