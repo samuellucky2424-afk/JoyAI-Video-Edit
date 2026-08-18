@@ -233,7 +233,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
 
         self.assertIn('id="identityLock"', html)
         self.assertIn("identity_lock: identityLock", html)
-        self.assertIn("reference_kv_scale: identityLock ? 1.5 : 1.0", html)
+        self.assertIn("reference_kv_scale: 1.0", html)
         self.assertIn("kv_reset_frames: identityLock ? 0", html)
         self.assertIn('payload.get("identity_lock", False)', server)
         self.assertIn("if identity_lock:\n                            kv_reset_frames = 0", server)
@@ -242,6 +242,11 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("reference_kv_scale=self.settings.reference_kv_scale", runtime)
         self.assertIn("model.scale_kv_cache_values(", pipeline)
         self.assertIn("def scale_kv_cache_values(", dit)
+        self.assertIn("stabilize_identity_exposure=identity_lock", server)
+        self.assertIn("else:\n                            # The upgraded RV2V checkpoint", server)
+        self.assertIn("if identity_lock:\n                            # Whole-frame static detection", server)
+        self.assertIn("def _stabilize_identity_exposure(", runtime)
+        self.assertIn("#####[EXPOSURE-GUARD]", runtime)
 
     def test_health_reports_required_runtime_optimizations(self):
         server = (
@@ -321,8 +326,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('label_en: "Reference Image"', html)
         self.assertIn('title_en: "My Reference Person"', html)
         self.assertIn(
-            "Replace the main subject in the video with the person shown in the "
-            "uploaded reference image.",
+            "Preserve the source pose, facial expression, lip movements, and motion.",
             html,
         )
 

@@ -97,6 +97,9 @@ class StreamingSettings:
     profile_timings: bool = False
     output_codec: str = "mjpeg"
     reference_kv_scale: float = 1.0
+    stabilize_identity_exposure: bool = False
+    identity_exposure_max_ratio: float = 1.18
+    identity_exposure_min_gain: float = 0.68
 
 @dataclass
 class StreamingChunkResult:
@@ -536,6 +539,8 @@ class JoyOmniV2VStreamingSession:
         self.pending_metas: list[dict[str, Any]] = []
         self.prev_source_frame: torch.Tensor | None = None
         self.ref_image_kv_prefilled = False
+        self._identity_exposure_gain = 1.0
+        self._identity_exposure_active = False
 
         self.streaming_cond_embeds: torch.Tensor | None = None
         self.last_chunk_profile: dict[str, Any] | None = None
@@ -1529,6 +1534,12 @@ class JoyOmniV2VStreamingSession:
                         profile=denoised.job.profile,
                         chunk_idx=denoised.job.chunk_idx,
                     )
+                    decoded_pixels = self._stabilize_identity_exposure(
+                        decoded_pixels,
+                        denoised.job.source_frames,
+                        profile=denoised.job.profile,
+                        chunk_idx=denoised.job.chunk_idx,
+                    )
                     _dec_ready = _record_ready_event()
 
                 self._set_debug_state("vae-decode", "put_pseudo_queue", denoised.job.chunk_idx)
@@ -1752,6 +1763,92 @@ class JoyOmniV2VStreamingSession:
             window_pixels = self.chunk_size * self.ffactor_t
             chunk_decoded = chunk_decoded[:, :, -window_pixels:]
         return chunk_decoded.detach()
+
+    @torch.no_grad()
+    def _stabilize_identity_exposure(
+        self,
+        decoded_pixels: torch.Tensor,
+        source_frames: list[Image.Image],
+        *,
+        profile: dict[str, Any] | None = None,
+        chunk_idx: int,
+    ) -> torch.Tensor:
+        """Stop clipped highlights from feeding back through the causal VAE.
+
+        RV2V streams reuse their decoded last frame as causal VAE context.  A
+        bright outlier can therefore become the next chunk's context and grow
+        into the long-horizon colour drift described in the JoyAI report.  For
+        identity-locked sessions only, compare a small luminance sample with
+        the aligned source chunk.  Correction is darkening-only, bounded, and
+        temporally smoothed; normal edits and non-clipping frames are untouched.
+
+        The correction happens before both the browser output and pseudo-VAE
+        re-encode, so a clipped frame is not fed back into the next decode.
+        """
+        if not self.settings.stabilize_identity_exposure or not source_frames:
+            return decoded_pixels
+
+        # A small sample keeps the guard cheap.  Quantiles are calculated in
+        # float32 because CUDA/BF16 quantile support varies between PyTorch
+        # versions used by the H200 image.
+        sample = (decoded_pixels[0, :, :, ::8, ::8].float() * 0.5 + 0.5).clamp_(0.0, 2.0)
+        output_luma = (
+            sample[0] * 0.2126
+            + sample[1] * 0.7152
+            + sample[2] * 0.0722
+        ).flatten()
+        output_p90 = float(torch.quantile(output_luma, 0.90).item())
+        clipped_fraction = float((output_luma >= 0.985).float().mean().item())
+
+        source_luma: list[np.ndarray] = []
+        for frame in source_frames:
+            rgb = np.asarray(frame.convert("RGB").resize((64, 36)), dtype=np.float32) / 255.0
+            source_luma.append(
+                rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
+            )
+        source_p90 = float(np.percentile(np.concatenate([x.ravel() for x in source_luma]), 90.0))
+
+        max_ratio = max(1.0, float(self.settings.identity_exposure_max_ratio))
+        allowed_p90 = min(0.92, max(0.72, source_p90 * max_ratio + 0.03))
+        desired_gain = 1.0
+        if output_p90 > allowed_p90 and clipped_fraction >= 0.015:
+            desired_gain = max(
+                float(self.settings.identity_exposure_min_gain),
+                min(1.0, allowed_p90 / max(output_p90, 1e-6)),
+            )
+
+        # Suppress a flare quickly, then recover slowly to prevent exposure
+        # pumping.  This state belongs to one streaming session/decode worker.
+        alpha = 0.70 if desired_gain < self._identity_exposure_gain else 0.08
+        self._identity_exposure_gain += alpha * (desired_gain - self._identity_exposure_gain)
+        gain = float(max(self.settings.identity_exposure_min_gain, min(1.0, self._identity_exposure_gain)))
+
+        if profile is not None:
+            profile["identity_exposure_gain"] = gain
+            profile["identity_output_luma_p90"] = output_p90
+            profile["identity_source_luma_p90"] = source_p90
+            profile["identity_clipped_fraction"] = clipped_fraction
+
+        if gain >= 0.995:
+            self._identity_exposure_active = False
+            return decoded_pixels
+
+        if not self._identity_exposure_active or chunk_idx % 20 == 0:
+            print(
+                "#####[EXPOSURE-GUARD] "
+                f"chunk={chunk_idx} gain={gain:.3f} source_p90={source_p90:.3f} "
+                f"output_p90={output_p90:.3f} clipped={clipped_fraction:.3f}",
+                flush=True,
+            )
+        self._identity_exposure_active = True
+
+        x01 = decoded_pixels.float().mul(0.5).add(0.5).mul_(gain)
+        # Soft highlight shoulder preserves gradients/skin detail that a hard
+        # clamp would turn into flat white pixels.
+        knee = 0.86
+        shoulder = knee + (1.0 - knee) * torch.tanh((x01 - knee) / (1.0 - knee))
+        x01 = torch.where(x01 > knee, shoulder, x01).clamp_(0.0, 1.0)
+        return x01.mul_(2.0).sub_(1.0).to(dtype=decoded_pixels.dtype)
 
     @torch.no_grad()
     def _encode_next_decode_pseudo_latent(

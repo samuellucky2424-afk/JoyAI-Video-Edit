@@ -93,15 +93,19 @@ proves stable. Refreshing the browser replaces the previous WebSocket session
 instead of waiting behind its stale session ticket.
 
 When a reference image is attached, the browser enables the experimental
-**Identity Lock** option. It keeps the official RV2V reference path and scales
-the cached reference values by `1.5` relative to generated-history values. The
-server clamps the scale to `1.0..2.0`, ignores it without a reference image, and
-does not change KV-cache shapes, so the CUDA-graph fast path remains eligible.
+**Identity Lock** option. It keeps the upgraded RV2V reference tokens globally
+visible at their official `1.0` strength and does not change KV-cache shapes, so
+the CUDA-graph fast path remains eligible. Earlier experimental builds used a
+`1.5` multiplier; that was removed because it could over-condition highlights.
 Identity-locked sessions also disable the legacy periodic hard KV reset. That
 reset used to run after 1,080 input frames (about 54 seconds at 20 FPS), discard
 the active identity history, and visibly restart the generated person.
-This can reduce reference drift but is not a biometric face-swap guarantee;
-disable the option if it causes over-conditioning or visual artifacts.
+Identity Lock also enables a bounded, darkening-only exposure guard before the
+decoded frame is reused by the causal VAE. It suppresses clipped highlight drift
+without changing ordinary non-reference edits. Whole-frame static KV freezing is
+disabled for these sessions so small eye and mouth motions remain in the current
+source context. This can reduce reference drift but is not a biometric face-swap
+guarantee.
 
 The Windows proxy caches the resolved RunPod address for ten minutes. This
 reduces repeated OS DNS lookups during keepalives and reconnects; a failed local

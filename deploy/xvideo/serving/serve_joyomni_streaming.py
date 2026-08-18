@@ -1387,7 +1387,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             reference_kv_scale = float(
                                 payload.get(
                                     "reference_kv_scale",
-                                    1.5 if identity_lock else 1.0,
+                                    1.0,
                                 )
                             )
                         except (TypeError, ValueError):
@@ -1404,6 +1404,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             continue
                         reference_kv_scale = max(1.0, min(2.0, reference_kv_scale))
                         if not identity_lock:
+                            reference_kv_scale = 1.0
+                        else:
+                            # The upgraded RV2V checkpoint already exposes the
+                            # reference tokens globally.  Ignore stale clients
+                            # that still request the experimental 1.5x boost.
                             reference_kv_scale = 1.0
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
                         # The reference KV is the long-lived identity anchor.
@@ -1439,6 +1444,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         freeze_kv_on_static = bool(
                             payload.get("freeze_kv_on_static", args.freeze_kv_on_static)
                         )
+                        if identity_lock:
+                            # Whole-frame static detection can miss small mouth
+                            # and eye motion.  Keep the current source chunk in
+                            # the attention window for reference-person calls.
+                            freeze_kv_on_static = False
                         static_diff_thresh = float(
                             payload.get("static_diff_thresh", args.static_diff_thresh)
                         )
@@ -1527,6 +1537,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             profile_timings=bool(payload.get("profile_timings", args.profile_timings)),
                             output_codec=output_codec,
                             reference_kv_scale=reference_kv_scale,
+                            stabilize_identity_exposure=identity_lock,
                         )
 
                         print("#####[RESTART] creating new session", flush=True)
