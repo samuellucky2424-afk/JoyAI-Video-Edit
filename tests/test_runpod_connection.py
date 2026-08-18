@@ -233,9 +233,11 @@ class RunPodConnectionContractTests(unittest.TestCase):
 
         self.assertIn('id="identityLock"', html)
         self.assertIn("identity_lock: identityLock", html)
-        self.assertIn("reference_kv_scale: 1.0", html)
+        self.assertIn("reference_kv_scale: identityLock ? 1.35 : 1.0", html)
         self.assertIn("kv_reset_frames: identityLock ? 0", html)
         self.assertIn('payload.get("identity_lock", False)', server)
+        self.assertIn("1.35 if identity_lock else 1.0", server)
+        self.assertIn("max(1.0, min(1.5, reference_kv_scale))", server)
         self.assertIn("if identity_lock:\n                            kv_reset_frames = 0", server)
         self.assertIn("reference_kv_scale=reference_kv_scale", server)
         self.assertIn("reference_kv_scale: float = 1.0", runtime)
@@ -243,10 +245,13 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("model.scale_kv_cache_values(", pipeline)
         self.assertIn("def scale_kv_cache_values(", dit)
         self.assertIn("stabilize_identity_exposure=identity_lock", server)
-        self.assertIn("else:\n                            # The upgraded RV2V checkpoint", server)
+        self.assertNotIn("reference_kv_scale = 1.0\n                        else:", server)
         self.assertIn("if identity_lock:\n                            # Whole-frame static detection", server)
         self.assertIn("def _stabilize_identity_exposure(", runtime)
         self.assertIn("#####[EXPOSURE-GUARD]", runtime)
+        self.assertIn('f"enabled={bool(self.settings.stabilize_identity_exposure)} "', runtime)
+        self.assertIn('f"{self.settings.reference_kv_scale:.2f} "', runtime)
+        self.assertIn('f"exposure_guard={bool(self.settings.stabilize_identity_exposure)}"', runtime)
 
     def test_health_reports_required_runtime_optimizations(self):
         server = (

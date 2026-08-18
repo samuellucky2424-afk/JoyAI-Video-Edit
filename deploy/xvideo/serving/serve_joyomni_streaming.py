@@ -1387,7 +1387,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             reference_kv_scale = float(
                                 payload.get(
                                     "reference_kv_scale",
-                                    1.0,
+                                    1.35 if identity_lock else 1.0,
                                 )
                             )
                         except (TypeError, ValueError):
@@ -1402,13 +1402,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "message": "reference_kv_scale must be finite",
                             })
                             continue
-                        reference_kv_scale = max(1.0, min(2.0, reference_kv_scale))
+                        # Keep the identity boost bounded.  The earlier 1.5x
+                        # experiment established the upper edge that worked in
+                        # live tests; accepting larger client values would risk
+                        # over-conditioning without evidence that it helps.
+                        reference_kv_scale = max(1.0, min(1.5, reference_kv_scale))
                         if not identity_lock:
-                            reference_kv_scale = 1.0
-                        else:
-                            # The upgraded RV2V checkpoint already exposes the
-                            # reference tokens globally.  Ignore stale clients
-                            # that still request the experimental 1.5x boost.
                             reference_kv_scale = 1.0
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
                         # The reference KV is the long-lived identity anchor.

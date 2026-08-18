@@ -1682,10 +1682,11 @@ async function beginSession() {
     num_inference_steps: Number(document.getElementById("steps").value),
     use_pe: usePe,
     identity_lock: identityLock,
-    // The upgraded RV2V weights already keep reference tokens globally
-    // visible.  Identity Lock preserves that anchor without amplifying its KV
-    // values, which can over-condition highlights and shift appearance.
-    reference_kv_scale: 1.0,
+    // The official RV2V anchor alone can copy appearance while underweighting
+    // facial identity for difficult source/reference pairs.  Use a moderated
+    // boost below the earlier 1.5x experiment; the exposure guard separately
+    // prevents bright decoded frames from feeding a long-horizon flare.
+    reference_kv_scale: identityLock ? 1.35 : 1.0,
     gate_enabled: faceGateDebugEnabled(),
     seed: SERVER_DEFAULTS.seed,
     // A hard KV/session reset discards the generated identity history and can

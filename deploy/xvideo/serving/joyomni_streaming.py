@@ -689,12 +689,14 @@ class JoyOmniV2VStreamingSession:
                 reference_kv_scale=self.settings.reference_kv_scale,
             )
             self.ref_image_kv_prefilled = True
-            if self.settings.reference_kv_scale != 1.0:
-                print(
-                    "#####[IDENTITY-LOCK] reference KV value scale="
-                    f"{self.settings.reference_kv_scale:.2f}",
-                    flush=True,
-                )
+            print(
+                "#####[IDENTITY-LOCK] "
+                f"enabled={bool(self.settings.stabilize_identity_exposure)} "
+                "reference KV value scale="
+                f"{self.settings.reference_kv_scale:.2f} "
+                f"exposure_guard={bool(self.settings.stabilize_identity_exposure)}",
+                flush=True,
+            )
 
         self._maybe_prepare_graph_runner()
 
