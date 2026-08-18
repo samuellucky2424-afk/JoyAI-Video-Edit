@@ -33,6 +33,7 @@ from xvideo.serving.joyomni_streaming import (
     StreamingSettings,
     _module_device,
 )
+from xvideo.serving.frame_audit import FrameAudit
 
 DEFAULT_DIT_CKPT = ""
 DEFAULT_FACE_DETECTOR_ONNX = str(REPO_ROOT / "deps" / "checkpoints" / "face_detection_yunet_2023mar.onnx")
@@ -642,6 +643,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     app.state.inference_lock = threading.Lock()
     app.state.active_session = None
     app.state.ws_debug = {}
+    app.state.frame_audit = None
 
     app.state.session_gate = SessionGate()
 
@@ -728,6 +730,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 "runtime_loaded": app.state.runtime is not None,
                 "ws": getattr(app.state, "ws_debug", {}),
                 "session": session_debug,
+                "frame_audit": (
+                    app.state.frame_audit.snapshot()
+                    if getattr(app.state, "frame_audit", None) is not None
+                    else None
+                ),
             }
         )
 
@@ -828,6 +835,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         send_lock = asyncio.Lock()
         stop_output_pump = asyncio.Event()
         output_task: asyncio.Task[None] | None = None
+        frame_audit = FrameAudit()
+        app.state.frame_audit = frame_audit
 
         flow = {"recv": None, "at": 0.0, "dropped": 0, "congested": False,
                 "base": 0, "has_ack": False, "probe": 0, "clamped": False,
@@ -1377,6 +1386,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
                         raw_session_prompt = str(payload.get("prompt", args.prompt))
                         session_prompt = raw_session_prompt
+                        frame_audit = FrameAudit()
+                        app.state.frame_audit = frame_audit
                         try:
                             ref_image = _decode_ref_image(payload.get("ref_image"))
                         except Exception as exc:
@@ -1553,6 +1564,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             output_codec=output_codec,
                             reference_kv_scale=reference_kv_scale,
                             stabilize_identity_exposure=identity_lock,
+                            frame_audit=frame_audit,
                         )
 
                         print("#####[RESTART] creating new session", flush=True)
@@ -1584,6 +1596,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "ref_image": ref_image is not None,
                                 "identity_lock": identity_lock,
                                 "reference_kv_scale": reference_kv_scale,
+                                "frame_audit": True,
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,
                                 "pe_model": args.pe_model or DEFAULT_PE_MODEL,
@@ -1636,6 +1649,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         next_frame_meta = {
                             "seq": int(payload.get("seq", frames_in + 1)),
                             "t_capture_ms": float(payload.get("t_capture_ms", time.time() * 1000.0)),
+                            "capture_seq": payload.get("capture_seq"),
+                            "camera_frame_seq": payload.get("camera_frame_seq"),
+                            "client_skip_total": payload.get("client_skip_total"),
+                            "client_uplink_drop_total": payload.get("client_uplink_drop_total"),
+                            "client_drain_factor": payload.get("client_drain_factor"),
                         }
                     elif msg_type == "ack":
                         _recv = payload.get("recv")
@@ -1715,6 +1733,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 }
                 frame_meta["t_server_recv_ms"] = time.time() * 1000.0
                 next_frame_meta = None
+                frame_audit.observe("wire", [frame_meta])
 
                 if not input_sniffed:
                     input_sniffed = True
@@ -1734,6 +1753,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     if session_settings is not None and session_settings.profile_timings:
                         frame_meta["jpeg_decode_ms"] = (time.perf_counter() - _dec_t0) * 1000.0
                     if uplink_frame is None:
+                        frame_audit.drop("h264_decode_no_frame", frame_meta)
                         continue
 
                 if kv_reset_frames > 0 and frames_since_session_reset >= kv_reset_frames:
@@ -1764,6 +1784,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         frame_meta["jpeg_decode_ms"] = (time.perf_counter() - _dec_t0) * 1000.0
                     else:
                         frame = _decode_image(frame_bytes)
+                    frame_audit.observe("decoded", [frame_meta])
 
                     if face_gate_pending:
                         _reason, _center, _nf = _check_face_gate(
@@ -1927,6 +1948,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             ws_debug["frames_dropped_backpressure"] = (
                                 int(ws_debug.get("frames_dropped_backpressure", 0)) + 1
                             )
+                            frame_audit.drop("inference_backpressure", frame_meta)
                             return session._drain_async_results()
 
                         _rec_i = rec_input
@@ -1934,6 +1956,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             _rec_i.submit(frame, frame_meta.get("t_capture_ms"))
                             ws_debug["rec_in_written"] = _rec_i.frames_written
                             ws_debug["rec_in_dropped"] = _rec_i.frames_dropped_recording
+                        frame_audit.observe("admitted", [frame_meta])
                         return session.push_frame(frame, frame_meta=frame_meta)
                     finally:
                         app.state.inference_lock.release()
@@ -1972,10 +1995,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 if isinstance(chunk_results, tuple) and chunk_results and isinstance(chunk_results[0], str):
                     sentinel = chunk_results[0]
                     if sentinel == "__no_person__":
+                        frame_audit.drop("presence_hold", frame_meta)
                         _hold_reason = chunk_results[1] if len(chunk_results) > 1 else "no_person"
                         await _send_json({"type": "no_person", "reason": _hold_reason, "frames_in": frames_in})
                         continue
                     if sentinel == "__person_returned__":
+                        frame_audit.drop("presence_return_reset", frame_meta)
                         face_gate_pending = True
                         gate_state["count"] = 0
                         gate_state["cx"] = None
@@ -1992,6 +2017,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         await _reset_session("person_returned")
                         continue
                 if isinstance(chunk_results, str) and chunk_results == "__gate_pe__":
+                    frame_audit.drop("prompt_enhance_gate", frame_meta)
                     if pe_task is None:
                         anchor = gate_state.get("pe_anchor")
                         gate_state["pe_anchor"] = None
@@ -2035,6 +2061,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     last_activity = time.monotonic()
                     continue
                 if isinstance(chunk_results, str):
+                    frame_audit.drop(f"face_gate:{chunk_results}", frame_meta)
                     await _send_json({"type": "waiting_face", "reason": chunk_results, "frames_in": frames_in})
                     continue
                 if face_gate_pending:
@@ -2094,6 +2121,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     app.state.active_session = None
                 ws_debug["closed_at"] = time.time()
                 ws_debug["send_state"] = "closed"
+                print(
+                    "#####[FRAME-AUDIT] "
+                    + json.dumps(frame_audit.snapshot(), separators=(",", ":"), sort_keys=True),
+                    flush=True,
+                )
             finally:
                 if ticket is not None:
                     app.state.session_gate.release(ticket)

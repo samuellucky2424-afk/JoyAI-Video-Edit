@@ -19,6 +19,7 @@ from xvideo.models.models import load_dit, load_pipeline, build_vae
 from xvideo.models.pipeline import (
     PRECISION_TO_TYPE,
 )
+from xvideo.serving.frame_audit import FrameAudit
 from xvideo.serving.graph_runner import GRAPH_WINDOW_CHUNKS, StreamingGraphRunner, graph_env_enabled
 from xvideo.utils import _dynamic_resize_from_bucket, seed_everything
 
@@ -100,6 +101,7 @@ class StreamingSettings:
     stabilize_identity_exposure: bool = False
     identity_exposure_max_ratio: float = 1.18
     identity_exposure_min_gain: float = 0.68
+    frame_audit: FrameAudit | None = None
 
 @dataclass
 class StreamingChunkResult:
@@ -1386,6 +1388,12 @@ class JoyOmniV2VStreamingSession:
             frozen_anchor_id=frozen_anchor_id,
             valid_count=valid_count,
         )
+        if self.settings.frame_audit is not None:
+            self.settings.frame_audit.observe(
+                "chunked",
+                source_metas,
+                valid_count=valid_count,
+            )
         self._set_debug_state("submit", "put_encode", chunk_idx)
 
         while True:
@@ -1456,6 +1464,12 @@ class JoyOmniV2VStreamingSession:
                         chunk_idx=job.chunk_idx,
                     )
                     ready = _record_ready_event()
+                if self.settings.frame_audit is not None:
+                    self.settings.frame_audit.observe(
+                        "vae_encoded",
+                        job.source_metas,
+                        valid_count=job.valid_count,
+                    )
                 self._timer_record(job.profile, "reference_prepare_s", started)
                 self._set_debug_state("vae-encode", "put_dit_queue", job.chunk_idx)
                 self._dit_queue.put(_EncodedChunk(job=job, ref_chunk_latent=ref_chunk_latent, ready_event=ready))
@@ -1498,6 +1512,12 @@ class JoyOmniV2VStreamingSession:
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
                         )
                         _dit_ready = _record_ready_event()
+                if self.settings.frame_audit is not None:
+                    self.settings.frame_audit.observe(
+                        "inference",
+                        encoded.job.source_metas,
+                        valid_count=encoded.job.valid_count,
+                    )
                 self._set_debug_state("dit-denoise", "put_decode_queue", encoded.job.chunk_idx)
                 self._decode_queue.put(
                     _DenoisedChunk(job=encoded.job, current_chunk_latents=current_chunk_latents, ready_event=_dit_ready)
@@ -1638,6 +1658,12 @@ class JoyOmniV2VStreamingSession:
                         valid_count=decoded.job.valid_count,
                     )
                 )
+                if self.settings.frame_audit is not None:
+                    self.settings.frame_audit.observe(
+                        "output",
+                        decoded.job.source_metas,
+                        valid_count=decoded.job.valid_count,
+                    )
                 self._inc_debug_counter("postprocessed_chunks")
             except BaseException as exc:
                 self._set_debug_state("postprocess", "error", decoded.job.chunk_idx)

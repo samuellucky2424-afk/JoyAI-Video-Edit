@@ -698,6 +698,8 @@ let upSkipCounter = 0;
 let upDropTotal = 0;
 let upDropAt = 0;
 let upResumeKeyframe = false;
+let captureTickTotal = 0;
+let cameraFrameTotal = 0;
 let serverChunkLastSec = null;
 let chunkProfileLast = null;
 let sessionProfileTimings = false;
@@ -1109,6 +1111,9 @@ function resetRunMetrics() {
   receivedFrames = 0;
   displayedFrames = 0;
   sendRealtimeSkips = 0;
+  captureTickTotal = 0;
+  cameraFrameTotal = 0;
+  upSeq = 0;
   tickInFlight = false;
   sentFramesWindow = 0;
   receivedFramesWindow = 0;
@@ -1282,8 +1287,19 @@ function resetUplinkEncoder() {
     try { upEncoder.close(); } catch (e) {}
   }
   upEncoder = null;
-  upSeq = 0;
   upPendingByTs.clear();
+}
+
+function uplinkFrameMeta(seq, captureSeq, tCaptureMs) {
+  return {
+    seq,
+    t_capture_ms: tCaptureMs,
+    capture_seq: captureSeq,
+    camera_frame_seq: cameraFrameTotal,
+    client_skip_total: sendRealtimeSkips,
+    client_uplink_drop_total: upDropTotal,
+    client_drain_factor: upDrainFactor,
+  };
 }
 
 function ensureUplinkEncoder(width, height) {
@@ -1302,7 +1318,7 @@ function ensureUplinkEncoder(width, height) {
       const buf = new ArrayBuffer(chunk.byteLength);
       chunk.copyTo(buf);
       try {
-        ws.send(JSON.stringify({ type: "frame_meta", seq: info.seq, t_capture_ms: info.t_capture_ms }));
+        ws.send(JSON.stringify({ type: "frame_meta", ...info }));
         ws.send(buf);
       } catch (e) {
         return;
@@ -1316,14 +1332,14 @@ function ensureUplinkEncoder(width, height) {
   upEncoder.configure(upEncoderConfig(width, height));
 }
 
-function encodeUplinkFrame(width, height) {
+function encodeUplinkFrame(width, height, captureSeq) {
   upSkipCounter += 1;
   const _mod = upDrainFactor <= 0.25 ? 3 : (upDrainFactor <= 0.5 ? 2 : 1);
   if (_mod > 1 && (upSkipCounter % _mod) !== 0) return;
   drawCaptureFrame(width, height);
   ensureUplinkEncoder(width, height);
   const seq = ++upSeq;
-  upPendingByTs.set(seq, { seq, t_capture_ms: Date.now() });
+  upPendingByTs.set(seq, uplinkFrameMeta(seq, captureSeq, Date.now()));
   let forceKey = false;
   if (upResumeKeyframe && ws && (ws.bufferedAmount || 0) < 131072) {
     forceKey = true;
@@ -1415,6 +1431,7 @@ function flushOutputQueueToLatest() {
 
 function measureCameraFrame(now) {
   cameraMeasuredFrames += 1;
+  cameraFrameTotal += 1;
   const elapsed = Math.max((now - cameraMeasureStartedAt) / 1000, 0.001);
   if (elapsed >= 1) {
     cameraMeasuredFps = cameraMeasuredFrames / elapsed;
@@ -1532,6 +1549,7 @@ function frameBlob(width, height, quality) {
 async function tick() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (pePausedSend) return;
+  const captureSeq = ++captureTickTotal;
   if (tickInFlight) {
     sendRealtimeSkips += 1;
     updateMetrics();
@@ -1548,7 +1566,7 @@ async function tick() {
     const height = Number(document.getElementById("height").value);
     const quality = Number(document.getElementById("quality").value);
     if (upCodecH264) {
-      encodeUplinkFrame(width, height);
+      encodeUplinkFrame(width, height, captureSeq);
       updateMetrics();
       return;
     }
@@ -1557,7 +1575,7 @@ async function tick() {
     const seq = sentFrames + 1;
     const tCaptureMs = Date.now();
     try {
-      ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
+      ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, captureSeq, tCaptureMs) }));
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(blob);
     } catch (err) {
@@ -1590,7 +1608,7 @@ async function sendCurrentVideoFrame(mediaTimeSec) {
   const seq = sentFrames + 1;
   const tCaptureMs = Math.round(mediaTimeSec * 1000);
   try {
-    ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
+    ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, seq, tCaptureMs) }));
     if (ws.readyState !== WebSocket.OPEN) return false;
     ws.send(blob);
   } catch (err) {

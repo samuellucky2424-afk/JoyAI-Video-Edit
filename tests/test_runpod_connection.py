@@ -260,6 +260,25 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('f"{self.settings.reference_kv_scale:.2f} "', runtime)
         self.assertIn('f"exposure_guard={bool(self.settings.stabilize_identity_exposure)}"', runtime)
 
+    def test_frame_delivery_audit_reaches_inference(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        self.assertIn("capture_seq: captureSeq", html)
+        self.assertIn("client_uplink_drop_total: upDropTotal", html)
+        self.assertIn('frame_audit.observe("wire", [frame_meta])', server)
+        self.assertIn('frame_audit.observe("decoded", [frame_meta])', server)
+        self.assertIn('frame_audit.observe("admitted", [frame_meta])', server)
+        self.assertIn('frame_audit.drop("inference_backpressure", frame_meta)', server)
+        self.assertIn('"#####[FRAME-AUDIT] "', server)
+        self.assertIn('"vae_encoded"', runtime)
+        self.assertIn('"inference"', runtime)
+        self.assertIn('"output"', runtime)
+
     def test_health_reports_required_runtime_optimizations(self):
         server = (
             ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
