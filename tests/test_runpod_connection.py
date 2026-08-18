@@ -2,6 +2,7 @@ import importlib.util
 import os
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
@@ -13,8 +14,77 @@ START = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(START)
 
+CHECKPOINT_STATUS_PATH = ROOT / "deploy" / "xvideo" / "checkpoint_status.py"
+CHECKPOINT_SPEC = importlib.util.spec_from_file_location(
+    "checkpoint_status", CHECKPOINT_STATUS_PATH
+)
+CHECKPOINT_STATUS = importlib.util.module_from_spec(CHECKPOINT_SPEC)
+assert CHECKPOINT_SPEC.loader is not None
+CHECKPOINT_SPEC.loader.exec_module(CHECKPOINT_STATUS)
+
 
 class RunPodConnectionContractTests(unittest.TestCase):
+    def test_current_rv2v_checkpoint_is_pinned_and_reported_by_health(self):
+        downloader = (ROOT / "runpod" / "download_models.py").read_text()
+        launcher = (ROOT / "runpod" / "Start-JoyAI-Realtime-Test.ps1").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        self.assertIn(CHECKPOINT_STATUS.JOYAI_DIT_RELEASE_COMMIT, downloader)
+        self.assertIn('"checkpoint": checkpoint_status(args.dit_ckpt)', server)
+        self.assertIn('$health.checkpoint.status -ne "current"', launcher)
+        self.assertIn("the upgraded RV2V checkpoint is active", launcher)
+
+    def test_checkpoint_metadata_identifies_current_and_stale_weights(self):
+        with TemporaryDirectory() as temporary_directory:
+            local_dir = Path(temporary_directory) / "JoyAI-Video-Edit"
+            checkpoint = local_dir / "dit" / "joyai_video_edit_dit_0811.pth"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"test checkpoint")
+            metadata = (
+                local_dir
+                / ".cache"
+                / "huggingface"
+                / "download"
+                / "dit"
+                / "joyai_video_edit_dit_0811.pth.metadata"
+            )
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text(
+                CHECKPOINT_STATUS.JOYAI_DIT_RELEASE_COMMIT
+                + "\n"
+                + CHECKPOINT_STATUS.JOYAI_DIT_XET_HASH
+                + "\n0\n"
+            )
+
+            report = CHECKPOINT_STATUS.checkpoint_status(checkpoint)
+            self.assertEqual(report["status"], "current")
+            self.assertEqual(report["verification"], "huggingface_metadata")
+
+            metadata.write_text("old-revision\nold-etag\n0\n")
+            report = CHECKPOINT_STATUS.checkpoint_status(checkpoint)
+            self.assertEqual(report["status"], "stale")
+
+    def test_checkpoint_without_metadata_is_unknown_until_full_hash(self):
+        with TemporaryDirectory() as temporary_directory:
+            checkpoint = (
+                Path(temporary_directory)
+                / "JoyAI-Video-Edit"
+                / "dit"
+                / "joyai_video_edit_dit_0811.pth"
+            )
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"not the official checkpoint")
+
+            report = CHECKPOINT_STATUS.checkpoint_status(checkpoint)
+            self.assertEqual(report["status"], "unknown")
+
+            report = CHECKPOINT_STATUS.checkpoint_status(
+                checkpoint, full_hash=True
+            )
+            self.assertEqual(report["status"], "stale")
+            self.assertEqual(report["verification"], "sha256")
+
     def test_preload_defaults_to_enabled(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(START.env_enabled("JOYOMNI_PRELOAD", default=True))
