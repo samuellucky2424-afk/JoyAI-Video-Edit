@@ -620,6 +620,7 @@ function stopRecordDrain() {
   if (finalizeWatchdog) { clearTimeout(finalizeWatchdog); finalizeWatchdog = null; }
 }
 let startingRun = false;
+let awaitingFirstAcceptance = false;
 let sessionGranted = false;
 let peCache = null;
 let pendingPeCacheKey = null;
@@ -1769,8 +1770,12 @@ async function start() {
           try { camera.currentTime = 0; } catch (err) {}
         }
         startingRun = false;
+        // A reference session may spend its first frame compiling the RV2V
+        // reference graph. Keep Send disabled during that one-time work so a
+        // second click cannot tear down a healthy initializing session.
+        awaitingFirstAcceptance = Boolean(refImage);
         pePausedSend = false;
-        setSendBusy(false, t("busy_running"));
+        setSendBusy(awaitingFirstAcceptance, t("busy_running"));
         outputWaitingFace = false;
         waitHintReason = null;
 
@@ -1866,7 +1871,16 @@ async function start() {
         return;
       }
       if (msg.type === "accepted") {
+        if (awaitingFirstAcceptance) {
+          awaitingFirstAcceptance = false;
+          setSendBusy(false, t("busy_running"));
+        }
         updateMetrics();
+        return;
+      }
+      if (msg.type === "error") {
+        awaitingFirstAcceptance = false;
+        setSendBusy(false, t("busy_conn_err"));
         return;
       }
       if (msg.type === "no_person") {
@@ -1950,6 +1964,10 @@ async function start() {
       return;
     }
     if (startingRun) return;
+    if (awaitingFirstAcceptance) {
+      awaitingFirstAcceptance = false;
+      setSendBusy(false, t("busy_running"));
+    }
     const meta = pendingOutputMeta;
     pendingOutputMeta = null;
     receivedFrames += 1;
@@ -1989,6 +2007,7 @@ async function start() {
     resultEpoch += 1;
     ws = null;
     startingRun = false;
+    awaitingFirstAcceptance = false;
     sessionGranted = false;
     setSendBusy(false, t("busy_disconnected"));
     // Keep the last successfully decoded result visible while the background
@@ -2033,6 +2052,7 @@ function stopActiveRun() {
     try { currentWs.close(); } catch (err) {}
   }
   startingRun = false;
+  awaitingFirstAcceptance = false;
   sessionGranted = false;
   setSendBusy(false, "");
 }

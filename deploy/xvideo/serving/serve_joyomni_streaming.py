@@ -1913,13 +1913,30 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         app.state.inference_lock.release()
 
                 started = time.time()
+                is_reference_initialization = bool(
+                    session.ref_image is not None and not session.initialized
+                )
+                push_frame_timeout_s = max(0.1, float(args.push_frame_timeout_s))
+                if is_reference_initialization:
+                    # The first RV2V frame may need to compile a reference-image
+                    # VAE graph and capture a ref-token CUDA graph on a fresh
+                    # worker. Do not let the steady-state stall guard cancel
+                    # that healthy one-time initialization while its worker
+                    # thread continues compiling in the background.
+                    push_frame_timeout_s = max(
+                        push_frame_timeout_s,
+                        float(args.reference_init_timeout_s),
+                    )
+                ws_debug["push_frame_timeout_s"] = push_frame_timeout_s
+                ws_debug["reference_initializing"] = is_reference_initialization
                 try:
                     chunk_results = await asyncio.wait_for(
                         asyncio.to_thread(_run_frame),
-                        timeout=max(0.1, float(args.push_frame_timeout_s)),
+                        timeout=push_frame_timeout_s,
                     )
                 except asyncio.TimeoutError:
-                    msg = f"push_frame timeout after {args.push_frame_timeout_s:.1f}s"
+                    phase = " during reference initialization" if is_reference_initialization else ""
+                    msg = f"push_frame timeout after {push_frame_timeout_s:.1f}s{phase}"
                     print(f"#####[WS-GUARD] {msg}", flush=True)
                     await _send_json({"type": "error", "message": msg})
                     break
@@ -2114,6 +2131,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--static-diff-thresh", type=float, default=0.5)
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--push-frame-timeout-s", type=float, default=15.0, help="Max seconds a single frame submission may block before releasing the WS session gate.")
+    parser.add_argument("--reference-init-timeout-s", type=float, default=300.0, help="Max seconds allowed for the first frame of a reference-image session to compile its VAE/ref-token graphs. Later frames still use --push-frame-timeout-s.")
     parser.add_argument("--max-inflight-chunks", type=int, default=2, help="Drop incoming frames while this many chunks are already in the pipeline (latency governor; pins display latency to ~N chunk periods). 2 keeps glass-to-glass latency low (~1 chunk) and prevents the session-start init stall from building a frame backlog (the 'ramp-up'); higher values buffer more (smoother under hiccups) at the cost of latency and a startup ramp. 0 disables. Overridable per session via the start payload's max_inflight_chunks.")
     parser.add_argument("--session-close-timeout-s", type=float, default=5.0, help="Best-effort session cleanup timeout during WS teardown.")
     parser.add_argument("--inference-lock-timeout-s", type=float, default=5.0, help="Max seconds to wait for the process-wide inference lock.")

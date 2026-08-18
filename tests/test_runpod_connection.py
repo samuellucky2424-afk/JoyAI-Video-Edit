@@ -179,7 +179,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("JOYOMNI_LOAD_WARMUP_STRICT=1", dockerfile)
         self.assertIn("JOYOMNI_FULL_WARMUP_TIMEOUT_SECONDS=300", dockerfile)
         self.assertIn("JOYOMNI_WARMUP_BOTH_ORIENTATIONS=0", dockerfile)
-        self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=0", dockerfile)
+        self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=1", dockerfile)
         self.assertIn(
             "JOYOMNI_CACHE_ROOT=/runpod-volume/joyai/cache/h200-torch291-cu128",
             dockerfile,
@@ -205,6 +205,20 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("const MAX_BACKEND_PENDING_FRAMES = 16;", html)
         self.assertIn("const UPLINK_KEYFRAME_INTERVAL = 20;", html)
         self.assertIn('autoQuality = true; autoQTier = 0;', html)
+
+    def test_reference_initialization_is_not_cancelled_by_live_frame_guard(self):
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn('--reference-init-timeout-s", type=float, default=300.0', server)
+        self.assertIn(
+            "session.ref_image is not None and not session.initialized",
+            server,
+        )
+        self.assertIn("timeout=push_frame_timeout_s", server)
+        self.assertIn("let awaitingFirstAcceptance = false;", html)
+        self.assertIn("setSendBusy(awaitingFirstAcceptance", html)
 
     def test_reference_identity_lock_is_wired_end_to_end(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
