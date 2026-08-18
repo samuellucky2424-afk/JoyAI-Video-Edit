@@ -12,7 +12,15 @@ import asyncio
 import json
 import os
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, WSCloseCode, WSMsgType, web
+from aiohttp import (
+    ClientError,
+    ClientSession,
+    ClientTimeout,
+    WSCloseCode,
+    WSMsgType,
+    WSServerHandshakeError,
+    web,
+)
 
 
 HOP_BY_HOP_HEADERS = {
@@ -27,6 +35,12 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+
+RUNPOD_WORKER_HEADER = "X-Runpod-Worker-Id"
+# RunPod's load balancer may not count an otherwise active WebSocket as worker
+# activity.  Keep this below the platform's 5-second default idle timeout so a
+# live stream cannot be scaled down underneath the browser.
+RUNPOD_KEEPALIVE_SECONDS = 3.0
 
 
 def proxy_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
@@ -56,6 +70,57 @@ def upstream_url(request: web.Request) -> str:
     return f"{request.app['upstream']}{request.rel_url}"
 
 
+def upstream_headers(app: web.Application) -> dict[str, str]:
+    """Authenticate and pin follow-up traffic to the selected RunPod worker."""
+    headers = dict(app["auth_headers"])
+    worker_id = app["proxy_state"].get("worker_id")
+    if worker_id:
+        headers[RUNPOD_WORKER_HEADER] = f"strict-resume {worker_id}"
+    return headers
+
+
+def remember_worker(app: web.Application, headers) -> str | None:
+    """Remember the worker chosen by RunPod for later HTTP and WS requests."""
+    worker_id = str(headers.get(RUNPOD_WORKER_HEADER, "")).strip()
+    if not worker_id:
+        return None
+    state = app["proxy_state"]
+    if state.get("worker_id") != worker_id:
+        state["worker_id"] = worker_id
+        print(f"JoyAI pinned to RunPod worker {worker_id}.", flush=True)
+    return worker_id
+
+
+async def keep_worker_active(app: web.Application) -> None:
+    """Reset RunPod's idle timer while the browser has a live WebSocket."""
+    session: ClientSession = app["session"]
+    failures = 0
+    while True:
+        await asyncio.sleep(RUNPOD_KEEPALIVE_SECONDS)
+        try:
+            async with session.get(
+                f"{app['upstream']}/health",
+                headers=upstream_headers(app),
+                timeout=ClientTimeout(total=10),
+            ) as response:
+                await response.read()
+                remember_worker(app, response.headers)
+                if response.status != 200:
+                    raise ClientError(
+                        f"RunPod keepalive returned HTTP {response.status}"
+                    )
+            failures = 0
+        except asyncio.CancelledError:
+            raise
+        except (ClientError, asyncio.TimeoutError, OSError) as error:
+            failures += 1
+            if failures == 1 or failures % 5 == 0:
+                print(
+                    f"JoyAI RunPod keepalive failed ({failures}): {error}",
+                    flush=True,
+                )
+
+
 async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
     downstream = web.WebSocketResponse(heartbeat=30)
     await downstream.prepare(request)
@@ -63,14 +128,35 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
     session: ClientSession = request.app["session"]
     proxy_state = request.app["proxy_state"]
     upstream = None
+    keepalive_task = None
     try:
-        upstream = await session.ws_connect(
-            upstream_url(request),
-            headers=request.app["auth_headers"],
-            heartbeat=30,
-            max_msg_size=0,
-        )
+        # The local readiness check captures X-Runpod-Worker-Id before the
+        # browser opens this socket.  Strict-resume prevents a reconnect from
+        # silently landing on a different, cold H200 worker.
+        try:
+            upstream = await session.ws_connect(
+                upstream_url(request),
+                headers=upstream_headers(request.app),
+                heartbeat=10,
+                max_msg_size=0,
+            )
+        except WSServerHandshakeError as error:
+            if error.status != 404 or not proxy_state.get("worker_id"):
+                raise
+            # A redeploy gives the worker a new ID. Retry normal routing once;
+            # the successful handshake response becomes the new affinity.
+            proxy_state["worker_id"] = None
+            upstream = await session.ws_connect(
+                upstream_url(request),
+                headers=upstream_headers(request.app),
+                heartbeat=10,
+                max_msg_size=0,
+            )
+        response = getattr(upstream, "_response", None)
+        if response is not None:
+            remember_worker(request.app, response.headers)
         print("JoyAI WebSocket connected through RunPod.", flush=True)
+        keepalive_task = asyncio.create_task(keep_worker_active(request.app))
 
         # The local proxy is intentionally single-viewer. Replacing a stale
         # browser socket explicitly tells the server to release its session
@@ -138,6 +224,9 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
                 }
             )
     finally:
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+            await asyncio.gather(keepalive_task, return_exceptions=True)
         upstream_code = getattr(upstream, "close_code", None)
         downstream_code = getattr(downstream, "close_code", None)
         print(
@@ -169,7 +258,7 @@ async def proxy_http(request: web.Request) -> web.Response:
     # upstream load balancer for an identity response so both PowerShell's
     # readiness probe and the browser receive bytes they can consume directly.
     headers["Accept-Encoding"] = "identity"
-    headers.update(request.app["auth_headers"])
+    headers.update(upstream_headers(request.app))
 
     try:
         async with session.request(
@@ -180,6 +269,7 @@ async def proxy_http(request: web.Request) -> web.Response:
             allow_redirects=False,
         ) as response:
             body = await response.read()
+            remember_worker(request.app, response.headers)
             return web.Response(
                 body=body,
                 status=response.status,
@@ -222,6 +312,7 @@ async def create_session(app: web.Application) -> None:
         "websocket_lock": asyncio.Lock(),
         "active_upstream": None,
         "active_downstream": None,
+        "worker_id": None,
     }
 
 
