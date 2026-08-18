@@ -201,6 +201,23 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("JoyAI WebSocket closed", text)
         self.assertIn('f"(browser={downstream_code}, RunPod={upstream_code})."', text)
 
+    def test_proxy_does_not_duplicate_browser_application_heartbeat(self):
+        proxy = (ROOT / "runpod" / "local_proxy.py").read_text()
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn("heartbeat=None", proxy)
+        self.assertNotIn("heartbeat=10", proxy)
+        self.assertIn('{ type: "ping", t: Date.now()', html)
+
+    def test_reference_person_replacement_has_an_explicit_prompt(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn('label_en: "Reference Image"', html)
+        self.assertIn('title_en: "My Reference Person"', html)
+        self.assertIn(
+            "Replace the main subject in the video with the person shown in the "
+            "uploaded reference image.",
+            html,
+        )
+
     def test_proxy_pins_reconnects_to_one_runpod_worker(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
         self.assertIn('RUNPOD_WORKER_HEADER = "X-Runpod-Worker-Id"', text)
