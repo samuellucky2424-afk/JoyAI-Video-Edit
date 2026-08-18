@@ -201,6 +201,27 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("JoyAI WebSocket closed", text)
         self.assertIn('f"(browser={downstream_code}, RunPod={upstream_code})."', text)
 
+    def test_proxy_pins_reconnects_to_one_runpod_worker(self):
+        text = (ROOT / "runpod" / "local_proxy.py").read_text()
+        self.assertIn('RUNPOD_WORKER_HEADER = "X-Runpod-Worker-Id"', text)
+        self.assertIn('f"strict-resume {worker_id}"', text)
+        self.assertIn("remember_worker(request.app, response.headers)", text)
+        self.assertIn('"worker_id": None', text)
+
+    def test_proxy_keeps_worker_active_during_websocket_stream(self):
+        text = (ROOT / "runpod" / "local_proxy.py").read_text()
+        self.assertIn("RUNPOD_KEEPALIVE_SECONDS = 3.0", text)
+        self.assertIn("async def keep_worker_active", text)
+        self.assertIn('f"{app[\'upstream\']}/health"', text)
+        self.assertIn("asyncio.create_task(keep_worker_active(request.app))", text)
+        self.assertIn("keepalive_task.cancel()", text)
+
+    def test_runpod_settings_limit_one_viewer_tests_to_one_worker(self):
+        text = (ROOT / "runpod" / "README.md").read_text()
+        self.assertIn("| Max workers | `1`", text)
+        self.assertIn("| Idle timeout | `60` seconds |", text)
+        self.assertIn("X-Runpod-Worker-Id: strict-resume", text)
+
 
 if __name__ == "__main__":
     unittest.main()
