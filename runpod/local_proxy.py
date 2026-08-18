@@ -70,6 +70,7 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
             heartbeat=30,
             max_msg_size=0,
         )
+        print("JoyAI WebSocket connected through RunPod.", flush=True)
 
         # The local proxy is intentionally single-viewer. Replacing a stale
         # browser socket explicitly tells the server to release its session
@@ -137,6 +138,13 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
                 }
             )
     finally:
+        upstream_code = getattr(upstream, "close_code", None)
+        downstream_code = getattr(downstream, "close_code", None)
+        print(
+            "JoyAI WebSocket closed "
+            f"(browser={downstream_code}, RunPod={upstream_code}).",
+            flush=True,
+        )
         if upstream is not None and not upstream.closed:
             try:
                 await upstream.send_json({"type": "stop"})

@@ -589,6 +589,11 @@ if (window.ResizeObserver && camera) {
   try { new ResizeObserver(() => updateCropMask()).observe(camera); } catch (e) {}
 }
 let ws = null;
+let streamingWanted = false;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+const RECONNECT_BASE_DELAY_MS = 750;
+const RECONNECT_MAX_DELAY_MS = 5000;
 let stream = null;
 let videoFileUrl = null;
 let usingVideoFile = false;
@@ -786,6 +791,25 @@ function startNetPingTimer() {
     }
     autoQualityTick();
   }, 1000);
+}
+
+function cancelReconnect() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
+function scheduleReconnect() {
+  if (!streamingWanted || reconnectTimer) return;
+  const delay = Math.min(
+    RECONNECT_MAX_DELAY_MS,
+    RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.min(reconnectAttempt, 3))
+  );
+  reconnectAttempt += 1;
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    if (!streamingWanted || ws) return;
+    await start();
+  }, delay);
 }
 
 function readRefImageDataUrl() {
@@ -1718,6 +1742,7 @@ async function start() {
         return;
       }
       if (msg.type === "started") {
+        reconnectAttempt = 0;
         if (Number(msg.width) > 0 && Number(msg.height) > 0) {
           document.getElementById("width").value = msg.width;
           document.getElementById("height").value = msg.height;
@@ -1959,6 +1984,7 @@ async function start() {
     setSendBusy(false, t("busy_disconnected"));
     showOutputIdle(true);
     updateMetrics();
+    scheduleReconnect();
   };
   socket.onerror = () => {
     if (ws === socket) {
@@ -1969,6 +1995,8 @@ async function start() {
 }
 
 function stopActiveRun() {
+  streamingWanted = false;
+  cancelReconnect();
   if (timer) clearInterval(timer);
   timer = null;
   stopVideoPull();
@@ -2015,6 +2043,7 @@ async function send() {
     sessionGranted = false;
   }
   stopActiveRun();
+  streamingWanted = true;
   await start();
 }
 
