@@ -204,9 +204,18 @@ class RunPodConnectionContractTests(unittest.TestCase):
     def test_proxy_pins_reconnects_to_one_runpod_worker(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
         self.assertIn('RUNPOD_WORKER_HEADER = "X-Runpod-Worker-Id"', text)
-        self.assertIn('f"strict-resume {worker_id}"', text)
+        self.assertIn("headers[RUNPOD_WORKER_HEADER] = worker_id", text)
         self.assertIn("remember_worker(request.app, response.headers)", text)
         self.assertIn('"worker_id": None', text)
+
+    def test_websocket_and_keepalive_do_not_wait_on_worker_affinity(self):
+        text = (ROOT / "runpod" / "local_proxy.py").read_text()
+        self.assertGreaterEqual(
+            text.count("upstream_headers(request.app, affinity=False)"),
+            1,
+        )
+        self.assertIn("upstream_headers(app, affinity=False)", text)
+        self.assertNotIn('f"strict-resume {worker_id}"', text)
 
     def test_proxy_keeps_worker_active_during_websocket_stream(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
@@ -220,7 +229,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         text = (ROOT / "runpod" / "README.md").read_text()
         self.assertIn("| Max workers | `1`", text)
         self.assertIn("| Idle timeout | `60` seconds |", text)
-        self.assertIn("X-Runpod-Worker-Id: strict-resume", text)
+        self.assertIn("soft", text)
 
 
 if __name__ == "__main__":
