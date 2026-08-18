@@ -26,6 +26,7 @@ from PIL import Image
 import uvicorn
 
 from xvideo.serving.pe import DEFAULT_MODEL as DEFAULT_PE_MODEL
+from xvideo.checkpoint_status import checkpoint_status
 from xvideo.serving.joyomni_streaming import (
     JoyOmniRuntime,
     StreamingSettings,
@@ -678,6 +679,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 "ok": True,
                 "runtime_loaded": app.state.runtime is not None,
                 "dit_ckpt": args.dit_ckpt,
+                "checkpoint": checkpoint_status(args.dit_ckpt),
                 "device": str(app.state.runtime.device) if app.state.runtime is not None else args.device,
                 "vae_device": str(_module_device(app.state.runtime.pipeline.vae)) if app.state.runtime is not None else args.vae_device,
                 "vae_encode_device": (
