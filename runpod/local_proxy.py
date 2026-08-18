@@ -18,7 +18,6 @@ from aiohttp import (
     ClientTimeout,
     WSCloseCode,
     WSMsgType,
-    WSServerHandshakeError,
     web,
 )
 
@@ -70,12 +69,19 @@ def upstream_url(request: web.Request) -> str:
     return f"{request.app['upstream']}{request.rel_url}"
 
 
-def upstream_headers(app: web.Application) -> dict[str, str]:
-    """Authenticate and pin follow-up traffic to the selected RunPod worker."""
+def upstream_headers(
+    app: web.Application,
+    *,
+    affinity: bool = True,
+) -> dict[str, str]:
+    """Authenticate requests and optionally prefer the selected worker."""
     headers = dict(app["auth_headers"])
     worker_id = app["proxy_state"].get("worker_id")
-    if worker_id:
-        headers[RUNPOD_WORKER_HEADER] = f"strict-resume {worker_id}"
+    if affinity and worker_id:
+        # Soft affinity never waits behind a worker RunPod considers at
+        # capacity. Max workers=1 remains the hard guarantee that a fallback
+        # cannot create a second H200 during one-viewer testing.
+        headers[RUNPOD_WORKER_HEADER] = worker_id
     return headers
 
 
@@ -100,7 +106,10 @@ async def keep_worker_active(app: web.Application) -> None:
         try:
             async with session.get(
                 f"{app['upstream']}/health",
-                headers=upstream_headers(app),
+                # RunPod can hold an affinity request while a long-lived WS is
+                # occupying the selected worker. With max workers=1, normal
+                # routing still reaches the only worker without that wait.
+                headers=upstream_headers(app, affinity=False),
                 timeout=ClientTimeout(total=10),
             ) as response:
                 await response.read()
@@ -130,28 +139,16 @@ async def proxy_websocket(request: web.Request) -> web.WebSocketResponse:
     upstream = None
     keepalive_task = None
     try:
-        # The local readiness check captures X-Runpod-Worker-Id before the
-        # browser opens this socket.  Strict-resume prevents a reconnect from
-        # silently landing on a different, cold H200 worker.
-        try:
-            upstream = await session.ws_connect(
-                upstream_url(request),
-                headers=upstream_headers(request.app),
-                heartbeat=10,
-                max_msg_size=0,
-            )
-        except WSServerHandshakeError as error:
-            if error.status != 404 or not proxy_state.get("worker_id"):
-                raise
-            # A redeploy gives the worker a new ID. Retry normal routing once;
-            # the successful handshake response becomes the new affinity.
-            proxy_state["worker_id"] = None
-            upstream = await session.ws_connect(
-                upstream_url(request),
-                headers=upstream_headers(request.app),
-                heartbeat=10,
-                max_msg_size=0,
-            )
+        # Do not put strict/soft affinity on the WebSocket upgrade. RunPod can
+        # hold an affinity upgrade outside the worker for several minutes even
+        # when ordinary HTTP requests reach it immediately. Max workers=1 pins
+        # normal routing to the only worker without blocking the handshake.
+        upstream = await session.ws_connect(
+            upstream_url(request),
+            headers=upstream_headers(request.app, affinity=False),
+            heartbeat=10,
+            max_msg_size=0,
+        )
         response = getattr(upstream, "_response", None)
         if response is not None:
             remember_worker(request.app, response.headers)
