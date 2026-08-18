@@ -96,6 +96,7 @@ class StreamingSettings:
     store_clean_self_only: bool = True
     profile_timings: bool = False
     output_codec: str = "mjpeg"
+    reference_kv_scale: float = 1.0
 
 @dataclass
 class StreamingChunkResult:
@@ -680,8 +681,15 @@ class JoyOmniV2VStreamingSession:
                 prompt_embeds=self.streaming_cond_embeds,
                 reference_image_latents=self.ref_image_latent,
                 transformer_dtype=self.target_dtype,
+                reference_kv_scale=self.settings.reference_kv_scale,
             )
             self.ref_image_kv_prefilled = True
+            if self.settings.reference_kv_scale != 1.0:
+                print(
+                    "#####[IDENTITY-LOCK] reference KV value scale="
+                    f"{self.settings.reference_kv_scale:.2f}",
+                    flush=True,
+                )
 
         self._maybe_prepare_graph_runner()
 
@@ -1308,6 +1316,7 @@ class JoyOmniV2VStreamingSession:
             "age_s": now - self._debug_started_at,
             "initialized": self.initialized,
             "has_ref_image": self.ref_image is not None,
+            "reference_kv_scale": self.settings.reference_kv_scale,
             "chunk_idx_next": self.chunk_idx,
             "pending_frames": len(self.pending_frames),
             "frames_per_next_chunk": self.frames_per_next_chunk,
