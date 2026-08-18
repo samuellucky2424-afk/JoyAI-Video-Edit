@@ -42,6 +42,16 @@ Use these values for a load-balancer endpoint:
 | Exposed HTTP ports | `8080,8081` |
 | Health-check path | `/ping` |
 | Active/min workers | `0` while testing to avoid idle GPU charges |
+| Max workers | `1` for one-viewer testing and cost safety |
+| Idle timeout | `60` seconds |
+
+RunPod does not reliably treat a quiet WebSocket as autoscaling activity. The
+local proxy therefore sends an authenticated `GET /health` every three seconds
+while the stream is open and pins every follow-up request with
+`X-Runpod-Worker-Id: strict-resume <worker-id>`. This keeps the selected worker
+alive during a session without paying for an always-on active worker. Limiting
+the endpoint to one worker also prevents a reconnect or page refresh from
+starting a second H200 while the first one is still usable.
 
 The H200 image default checkpoint path is
 `/runpod-volume/joyai/checkpoints`. Mount the model network volume so that the
@@ -81,6 +91,11 @@ finalization are disabled, the presence gate is off, and the browser starts at
 100 ms, and the adaptive downlink can increase quality after the connection
 proves stable. Refreshing the browser replaces the previous WebSocket session
 instead of waiting behind its stale session ticket.
+
+The proxy records the `X-Runpod-Worker-Id` returned by the initial local health
+check and uses RunPod strict-resume affinity for the page, assets, and WebSocket.
+This is required because the video session and loaded model state live inside
+one worker; an unpinned reconnect can otherwise land on a different cold worker.
 
 The H200 image enables the upstream compiled/autotuned VAE path. TorchInductor,
 Triton, and CUDA caches are stored under
