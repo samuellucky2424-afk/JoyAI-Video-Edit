@@ -1481,6 +1481,15 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         session_max_inflight = max(0, int(
                             payload.get("max_inflight_chunks", args.max_inflight_chunks) or 0
                         ))
+                        vae_posterior_mode = str(
+                            payload.get("vae_posterior_mode", "sample")
+                        ).strip().lower()
+                        if vae_posterior_mode not in {"sample", "mode"}:
+                            await _send_json({
+                                "type": "error",
+                                "message": "vae_posterior_mode must be 'sample' or 'mode'",
+                            })
+                            continue
                         use_pe = bool(payload.get("use_pe", args.use_pe)) and bool(os.environ.get("OPENAI_API_KEY"))
 
                         entry_gate = bool(payload.get("gate_enabled", True))
@@ -1564,6 +1573,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             output_codec=output_codec,
                             reference_kv_scale=reference_kv_scale,
                             stabilize_identity_exposure=identity_lock,
+                            vae_posterior_mode=vae_posterior_mode,
                             frame_audit=frame_audit,
                         )
 
@@ -1576,6 +1586,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "has_ref_image": ref_image is not None,
                             "identity_lock": identity_lock,
                             "reference_kv_scale": reference_kv_scale,
+                            "vae_posterior_mode": session_settings.vae_posterior_mode,
                         }
                         print(
                             "#####[SESSION-CONFIG] "
@@ -1613,6 +1624,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "ref_image": ref_image is not None,
                                 "identity_lock": identity_lock,
                                 "reference_kv_scale": reference_kv_scale,
+                                "vae_posterior_mode": session_settings.vae_posterior_mode,
                                 "num_inference_steps": session_settings.num_inference_steps,
                                 "frame_audit": True,
                                 "kv_reset_frames": kv_reset_frames,

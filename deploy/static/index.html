@@ -273,6 +273,10 @@
     <div><input id="quality" type="number" value="0.2" min="0.1" max="1" step="0.01" /></div>
   </div>
   <input id="steps" type="number" value="2" min="1" max="8" />
+  <select id="vaePosteriorMode">
+    <option value="sample" selected>sample</option>
+    <option value="mode">mode</option>
+  </select>
   <label><input id="smoothPlayback" type="checkbox" checked /> <span data-i18n="smooth_playback">平滑输出播放</span></label>
   <div id="playbackDelayWrap" class="row">
     <div><input id="targetQueueDelayMs" type="number" value="100" min="0" max="5000" step="50" /></div>
@@ -1724,6 +1728,7 @@ async function beginSession() {
     kv_reset_frames: identityLock ? 0 : Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
     output_quality: Number(downQualityUi.value),
     fps: sendTargetFps(),
+    vae_posterior_mode: document.getElementById("vaePosteriorMode").value,
     output_codec: h264DecodeOk ? "h264" : "mjpeg",
     input_codec: upCodecH264 ? "h264" : "mjpeg"
   };
@@ -2633,7 +2638,7 @@ document.getElementById("useMaxTemporalIds").addEventListener("change", () => {
   updateMaxTemporalIdsVisibility();
   updateMetrics();
 });
-for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "usePe", "identityLock", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "dbgGateEnabled"]) {
+for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "vaePosteriorMode", "usePe", "identityLock", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "dbgGateEnabled"]) {
   document.getElementById(id).addEventListener("input", updateMetrics);
   document.getElementById(id).addEventListener("change", updateMetrics);
 }
@@ -2786,6 +2791,10 @@ function applyServerDefaults() {
     setDownQuality(Q_TIERS[autoQTier], { live: false });
   }
   if (typeof syncUpQualityUi === "function") syncUpQualityUi();
+  const posteriorParam = new URLSearchParams(window.location.search).get("vae_posterior");
+  if (posteriorParam === "sample" || posteriorParam === "mode") {
+    document.getElementById("vaePosteriorMode").value = posteriorParam;
+  }
 }
 
 window.addEventListener("load", () => {

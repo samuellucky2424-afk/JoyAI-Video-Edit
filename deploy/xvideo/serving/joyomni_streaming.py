@@ -101,6 +101,7 @@ class StreamingSettings:
     stabilize_identity_exposure: bool = False
     identity_exposure_max_ratio: float = 1.18
     identity_exposure_min_gain: float = 0.68
+    vae_posterior_mode: str = "sample"
     frame_audit: FrameAudit | None = None
 
 @dataclass
@@ -498,10 +499,19 @@ class JoyOmniV2VStreamingSession:
         self.raw_prompt = prompt
         self.prompt = prompt
         self.settings = settings
+        if settings.vae_posterior_mode not in {"sample", "mode"}:
+            raise ValueError(
+                "vae_posterior_mode must be 'sample' or 'mode', "
+                f"got {settings.vae_posterior_mode!r}."
+            )
         self.ref_image = ref_image.convert("RGB") if ref_image is not None else None
         self.ref_image_latent: torch.Tensor | None = None
         self.device = self.pipeline.transformer.device
         self.generator = torch.Generator(device=self.device).manual_seed(settings.seed)
+        print(
+            f"#####[VAE-POSTERIOR] mode={settings.vae_posterior_mode}",
+            flush=True,
+        )
 
         self._prev_static_gray: np.ndarray | None = None
         self._static_anchor_id: int | None = None
@@ -722,6 +732,12 @@ class JoyOmniV2VStreamingSession:
         self.streaming_cond_embeds = prompt_embeds
 
     @torch.no_grad()
+    def _posterior_latent(self, posterior: Any) -> torch.Tensor:
+        if self.settings.vae_posterior_mode == "mode":
+            return posterior.mode()
+        return posterior.sample()
+
+    @torch.no_grad()
     def _encode_ref_image_latent(self) -> torch.Tensor | None:
         if self.ref_image is None:
             return None
@@ -756,7 +772,7 @@ class JoyOmniV2VStreamingSession:
             encoded = _vc.encode_via_dynamic(self.pipeline.vae, ref_img_encoded)
         if not hasattr(encoded, "latent_dist"):
             raise TypeError(f"Unsupported VAE encode output type for ref image: {type(encoded)}")
-        ref_img_latent = encoded.latent_dist.sample()
+        ref_img_latent = self._posterior_latent(encoded.latent_dist)
         if self.enable_denormalization:
             ref_img_latent = self.pipeline.normalize_latents(ref_img_latent)
 
@@ -1714,6 +1730,7 @@ class JoyOmniV2VStreamingSession:
             ref_latent = self.pipeline._sample_vae_latents(
                 source_window,
                 enable_denormalization=self.enable_denormalization,
+                posterior_mode=self.settings.vae_posterior_mode,
             )
         if profile is not None:
             self._timer_record(profile, "vae_encode_s", started)
@@ -1899,7 +1916,7 @@ class JoyOmniV2VStreamingSession:
             with _vc.call_guard():
                 pseudo_enc = pseudo_vae.encode(prev_pixels)
             if hasattr(pseudo_enc, "latent_dist"):
-                pseudo_latent = pseudo_enc.latent_dist.sample()
+                pseudo_latent = self._posterior_latent(pseudo_enc.latent_dist)
             else:
                 pseudo_latent = pseudo_enc
         self._set_debug_state("postprocess", "store_pseudo_latent", chunk_idx)

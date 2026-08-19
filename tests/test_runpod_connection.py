@@ -296,6 +296,31 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('"inference"', runtime)
         self.assertIn('"output"', runtime)
 
+    def test_vae_posterior_mode_is_selectable_per_session(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        pipeline = (ROOT / "deploy" / "xvideo" / "models" / "pipeline.py").read_text()
+
+        self.assertIn('id="vaePosteriorMode"', html)
+        self.assertIn('get("vae_posterior")', html)
+        self.assertIn('vae_posterior_mode: document.getElementById("vaePosteriorMode").value', html)
+        self.assertIn("vae_posterior_mode not in {\"sample\", \"mode\"}", server)
+        self.assertIn("vae_posterior_mode=vae_posterior_mode", server)
+        self.assertIn('"vae_posterior_mode": session_settings.vae_posterior_mode', server)
+        self.assertIn('vae_posterior_mode: str = "sample"', runtime)
+        self.assertIn("#####[VAE-POSTERIOR]", runtime)
+        self.assertIn("self._posterior_latent(encoded.latent_dist)", runtime)
+        self.assertIn("self._posterior_latent(pseudo_enc.latent_dist)", runtime)
+        self.assertIn("posterior_mode=self.settings.vae_posterior_mode", runtime)
+        self.assertIn('if posterior_mode == "mode":', pipeline)
+        self.assertIn("latents = posterior.mode()", pipeline)
+        self.assertIn("latents = posterior.sample()", pipeline)
+
     def test_health_reports_required_runtime_optimizations(self):
         server = (
             ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
