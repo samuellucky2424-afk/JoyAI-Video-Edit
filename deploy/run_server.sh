@@ -99,6 +99,7 @@ python xvideo/serving/serve_joyomni_streaming.py \
   --postprocess-device "$DEVICE" \
   --width "${JOYOMNI_WIDTH:-840}" --height "${JOYOMNI_HEIGHT:-480}" \
   --fps "${JOYOMNI_FPS:-24}" \
+  --num-inference-steps "${JOYOMNI_NUM_INFERENCE_STEPS:-2}" \
   --host "$HOST" --port "$PORT" \
   "${EXTRA_ARGS[@]}" \
   "$@"

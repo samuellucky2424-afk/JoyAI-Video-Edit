@@ -167,13 +167,16 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('getattr(error, "winerror", None) == 10054', text)
         self.assertIn('"_call_connection_lost" in message', text)
 
-    def test_h200_live_mode_disables_recording_and_uses_low_bandwidth_defaults(self):
+    def test_h200_live_mode_uses_controlled_720p_two_step_preset(self):
         dockerfile = (ROOT / "Dockerfile.h200").read_text()
         launcher = (ROOT / "deploy" / "run_server.sh").read_text()
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
         self.assertIn("JOYOMNI_RECORD_ENABLED=0", dockerfile)
         self.assertIn("JOYOMNI_ONLINE_GATE_ENABLED=0", dockerfile)
+        self.assertIn("JOYOMNI_WIDTH=1248", dockerfile)
+        self.assertIn("JOYOMNI_HEIGHT=720", dockerfile)
         self.assertIn("JOYOMNI_FPS=20", dockerfile)
+        self.assertIn("JOYOMNI_NUM_INFERENCE_STEPS=2", dockerfile)
         self.assertIn("JOYOMNI_VAE_COMPILE=1", dockerfile)
         self.assertIn("JOYOMNI_VAE_COMPILE_STRICT=1", dockerfile)
         self.assertIn("JOYOMNI_LOAD_WARMUP_STRICT=1", dockerfile)
@@ -189,6 +192,10 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('$CACHE_ROOT/triton', launcher)
         self.assertIn('$CACHE_ROOT/nv_compute', launcher)
         self.assertIn('EXTRA_ARGS+=(--record-dir "$RECORD_DIR")', launcher)
+        self.assertIn(
+            '--num-inference-steps "${JOYOMNI_NUM_INFERENCE_STEPS:-2}"',
+            launcher,
+        )
         self.assertNotIn('  --record-dir "$RECORD_DIR" \\\n', launcher)
         self.assertNotIn('id="downloadBubble"', html)
         self.assertNotIn('id="outputStartOverlay"', html)
@@ -252,6 +259,10 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("model.scale_kv_cache_values(", pipeline)
         self.assertIn("def scale_kv_cache_values(", dit)
         self.assertIn("stabilize_identity_exposure=identity_lock", server)
+        self.assertIn('task_type = "rv2v" if ref_image is not None else "v2v"', server)
+        self.assertIn('images=[ref_image] if ref_image is not None else None', server)
+        self.assertIn('"num_inference_steps": session_settings.num_inference_steps', server)
+        self.assertIn('"#####[SESSION-CONFIG] "', server)
         self.assertNotIn("reference_kv_scale = 1.0\n                        else:", server)
         self.assertIn("if identity_lock:\n                            # Whole-frame static detection", server)
         self.assertIn("def _stabilize_identity_exposure(", runtime)

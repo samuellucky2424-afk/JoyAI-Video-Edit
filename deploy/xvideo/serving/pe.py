@@ -73,6 +73,25 @@ Output: "Add a vintage, wide-brimmed burgundy fedora hat onto the woman's head. 
 - Typography/Text Rendering Rule: This rule applies ONLY to text the user explicitly names in the Target Objective. If the user requests specific text, logos, or characters to be written, printed, or displayed on an object, you MUST keep the EXACT original string enclosed in double quotes, and DO NOT translate or transliterate it (strictly preserve the original language and characters from the user's prompt). Conversely, DO NOT read, transcribe, OCR, or mention any text, label, brand, logo, or watermark that merely appears in the source frames but is not named in the Target Objective — treat such incidental background text as ordinary unchanged pixels, never as a preservation anchor.
 """
 
+RV2V_TEMPLATE = """# INPUT DATA
+- Target Objective: "{user_prompt}"
+- Image 1: the identity reference. Treat its visible appearance as the authoritative identity.
+- Image 2: the current source-video performance frame. Treat its motion and expression as the authoritative performance.
+
+# REFERENCE-IDENTITY VIDEO PROMPT TASK
+Write one concise, production-ready English prompt for reference-guided video-to-video editing. Begin exactly with:
+"Replace the main subject with the person from Image 1:"
+
+Immediately describe concrete, stable identity anchors that are visibly supported by Image 1: apparent adult age range, face shape and proportions, hairline, hair color/texture/style, eyebrows, eyes, nose, lips, jaw/chin, visible facial hair or other distinctive features, natural skin tone and undertone, and visible skin texture. Mention clothing only when it is a useful identity anchor. Do not guess nationality, ethnicity, medical traits, or details hidden by shadow, crop, hair, or occlusion.
+
+Require those reference attributes to remain unchanged and temporally consistent in every frame, including natural skin tone and visible skin texture across the face, neck, arms, and hands whenever those areas are visible. Require the source performer from Image 2 to control only pose, head motion, eye direction and blinks, eyebrow and cheek motion, facial expression, jaw motion, precise mouth shape and lip articulation, hand gestures, and body motion. Preserve the source scene composition, lighting interaction, and background unless the Target Objective explicitly requests otherwise. Explicitly prevent identity drift, face-shape drift, age drift, hairstyle drift, skin-tone shifts, waxy/plastic skin, frozen expressions, and generic mouth motion.
+
+# STRICT OUTPUT CONSTRAINTS
+- Return only one cohesive prompt paragraph of roughly 100-170 words, with no bullets, labels, preamble, or explanation.
+- Use only traits visibly supported by Image 1; never invent occluded details.
+- Do not copy the source performer's identity, age, skin appearance, hair, or clothing into the replacement identity.
+"""
+
 
 def _downscale(image: Image.Image, max_side: int = PE_IMAGE_MAX_SIDE) -> Image.Image:
     if max_side and max_side > 0:
@@ -153,7 +172,7 @@ def _sanitize_enhanced(text: str, fallback: str) -> str:
 
 def _build_messages(system_prompt: str, user_text: str, images_b64: List[str]):
     content = [{"type": "text", "text": user_text}]
-    for i, b64 in enumerate(images_b64):
+    for i, b64 in enumerate(images_b64, start=1):
         content.append({"type": "text", "text": f"\n[Image {i}]:"})
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
     return [
@@ -200,5 +219,24 @@ class PromptEnhancer:
         if not user_prompt or not user_prompt.strip():
             return user_prompt
         video_frames = _video_frames_to_b64(video)
+        reference_items = []
+        if image is not None:
+            reference_items.append(image)
+        if images:
+            reference_items.extend(images if isinstance(images, list) else [images])
+        reference_frames = _video_frames_to_b64(reference_items)
+        if reference_frames:
+            # The identity template deliberately uses one authoritative reference and
+            # one current performance frame. Extra images would make the Image 1 /
+            # Image 2 roles ambiguous and increase VLM latency without helping the
+            # single-reference streaming workflow.
+            ordered_frames = reference_frames[:1] + video_frames[:1]
+            text = RV2V_TEMPLATE.format(user_prompt=user_prompt)
+            return self._chat(
+                SYSTEM_PROMPT,
+                text,
+                ordered_frames,
+                raw_fallback=user_prompt,
+            ) or user_prompt
         text = V2V_TEMPLATE.format(user_prompt=user_prompt)
         return self._chat(SYSTEM_PROMPT, text, video_frames, raw_fallback=user_prompt) or user_prompt

@@ -375,7 +375,7 @@ def _enhance_prompt_sync(
     pe_model: str | None,
 ) -> dict[str, Any]:
     started = time.time()
-    task_type = "v2v"
+    task_type = "rv2v" if ref_image is not None else "v2v"
     enhanced_prompt = raw_prompt
     error = None
     model = pe_model or DEFAULT_PE_MODEL
@@ -1567,6 +1567,22 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             frame_audit=frame_audit,
                         )
 
+                        session_config = {
+                            "width": session_settings.width,
+                            "height": session_settings.height,
+                            "fps": int(payload.get("fps", args.fps)),
+                            "num_inference_steps": session_settings.num_inference_steps,
+                            "use_pe": use_pe,
+                            "has_ref_image": ref_image is not None,
+                            "identity_lock": identity_lock,
+                            "reference_kv_scale": reference_kv_scale,
+                        }
+                        print(
+                            "#####[SESSION-CONFIG] "
+                            + json.dumps(session_config, separators=(",", ":"), sort_keys=True),
+                            flush=True,
+                        )
+
                         print("#####[RESTART] creating new session", flush=True)
                         session = _create_session()
                         print("#####[RESTART] new session created; sending 'started'", flush=True)
@@ -1584,6 +1600,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ws_debug["has_ref_image"] = ref_image is not None
                         ws_debug["identity_lock"] = identity_lock
                         ws_debug["reference_kv_scale"] = reference_kv_scale
+                        ws_debug["session_config"] = session_config
                         ws_debug["last_message_type"] = "start"
                         await _send_json(
                             {
@@ -1596,6 +1613,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "ref_image": ref_image is not None,
                                 "identity_lock": identity_lock,
                                 "reference_kv_scale": reference_kv_scale,
+                                "num_inference_steps": session_settings.num_inference_steps,
                                 "frame_audit": True,
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,

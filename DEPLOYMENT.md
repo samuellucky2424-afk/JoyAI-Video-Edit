@@ -287,6 +287,7 @@ Key variables:
 | `JOYOMNI_DEVICE` | CUDA device for all stages (default `cuda:0`). |
 | `JOYOMNI_HOST` / `JOYOMNI_PORT` | bind address (default `0.0.0.0:8080`). |
 | `JOYOMNI_WIDTH` / `JOYOMNI_HEIGHT` / `JOYOMNI_FPS` | Output resolution and frame rate (default `840` / `480` / `24` = 480p @ 24 FPS). Per-GPU presets in §5. |
+| `JOYOMNI_NUM_INFERENCE_STEPS` | Denoising steps per frame (default `2`, matching the released checkpoint recommendation). |
 | `JOYOMNI_FP8_IMG` / `JOYOMNI_FP8_TXT` | FP8 image / text paths via `joyomni_ops` (default `1` / `1`). Set both `0` to run bf16 (e.g. a `JOYOMNI_OPS_NO_FP8=1` build). |
 | `JOYOMNI_CUDA_GRAPH` | capture the steady-state chunk loop into a CUDA graph (default `1`; the biggest single speedup). `0` runs eager. |
 | `JOYOMNI_SAGE_ATTN` | SageAttention for long-kv attention (default `1`). `0` falls back to SDPA/cuDNN. |
@@ -323,6 +324,14 @@ The server defaults to **840×480 @ 24 FPS** (480p). Override per GPU with `JOYO
   ```bash
   JOYOMNI_WIDTH=1248 JOYOMNI_HEIGHT=720 JOYOMNI_FPS=24 bash deploy/run_server.sh
   ```
+
+- **NVIDIA H200** — native 720p @ 20 FPS with two inference steps (the `Dockerfile.h200` preset):
+
+  ```bash
+  JOYOMNI_WIDTH=1248 JOYOMNI_HEIGHT=720 JOYOMNI_FPS=20 JOYOMNI_NUM_INFERENCE_STEPS=2 bash deploy/run_server.sh
+  ```
+
+  Keep Prompt Enhance enabled and provide an evenly lit, frontal reference image. The reference-aware enhancer sends that photo to the VLM as Image 1 and the current source-performance frame as Image 2, then turns visible static identity traits into per-frame anchors. This requires `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `PE_MODEL`; without them the raw prompt is used.
 
 - **RTX PRO 6000** — 480p @ 24 FPS, or native 720p @ 16 FPS. The [live HuggingFace demo](https://huggingface.co/spaces/wxDai/joyai-video-edit) runs the 480p @ 24 FPS preset on this GPU:
 
