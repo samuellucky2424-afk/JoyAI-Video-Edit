@@ -1414,7 +1414,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             reference_kv_scale = float(
                                 payload.get(
                                     "reference_kv_scale",
-                                    1.35 if identity_lock else 1.0,
+                                    1.5 if identity_lock else 1.0,
                                 )
                             )
                         except (TypeError, ValueError):
