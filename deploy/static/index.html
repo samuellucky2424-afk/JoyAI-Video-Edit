@@ -1674,7 +1674,7 @@ async function beginSession() {
   const rawPrompt = document.getElementById("prompt").value;
   const peSuppressed = suppressPeThisSend;
   suppressPeThisSend = false;
-  const usePe = !peSuppressed && !refImage && document.getElementById("usePe").checked;
+  const usePe = !peSuppressed && document.getElementById("usePe").checked;
   const identityLock = !!refImage && document.getElementById("identityLock").checked;
   identityFidelityMode = identityLock;
   const width = Number(document.getElementById("width").value);
@@ -1713,8 +1713,8 @@ async function beginSession() {
     identity_lock: identityLock,
     // The official RV2V anchor alone can copy appearance while underweighting
     // facial identity for difficult source/reference pairs. Use the established
-    // bounded 1.5x upper edge; the exposure guard separately prevents bright
-    // decoded frames from feeding a long-horizon flare.
+    // bounded 1.5x upper edge; the exposure guard separately
+    // prevents bright decoded frames from feeding a long-horizon flare.
     reference_kv_scale: identityLock ? 1.5 : 1.0,
     gate_enabled: faceGateDebugEnabled(),
     seed: SERVER_DEFAULTS.seed,
@@ -2235,7 +2235,7 @@ function refImageActive() {
 function syncPeAvailability() {
   const usePeEl = document.getElementById("usePe");
   const peAvailable = !(SERVER_DEFAULTS && SERVER_DEFAULTS.pe_available === false);
-  const locked = refImageActive() || !peAvailable;
+  const locked = !peAvailable;
   if (usePeEl) {
     usePeEl.disabled = locked;
     if (!peAvailable) usePeEl.checked = false;

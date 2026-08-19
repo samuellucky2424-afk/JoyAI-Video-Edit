@@ -261,6 +261,12 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("stabilize_identity_exposure=identity_lock", server)
         self.assertIn('task_type = "rv2v" if ref_image is not None else "v2v"', server)
         self.assertIn('images=[ref_image] if ref_image is not None else None', server)
+        self.assertIn(
+            'const usePe = !peSuppressed && document.getElementById("usePe").checked;',
+            html,
+        )
+        self.assertNotIn("!peSuppressed && !refImage", html)
+        self.assertIn("const locked = !peAvailable;", html)
         self.assertIn('"num_inference_steps": session_settings.num_inference_steps', server)
         self.assertIn('"#####[SESSION-CONFIG] "', server)
         self.assertNotIn("reference_kv_scale = 1.0\n                        else:", server)
