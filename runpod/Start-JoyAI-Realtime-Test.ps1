@@ -49,7 +49,7 @@ try {
     $baseUrl = "https://$EndpointId.api.runpod.ai"
 
     Write-Host "Starting the JoyAI worker through GET /health..."
-    Write-Host "The H200 must load the 32.5 GB DiT checkpoint before RunPod routes traffic."
+    Write-Host "The RTX PRO 6000 must load the 32.5 GB DiT checkpoint before RunPod routes traffic."
     Write-Host "The first compiled-VAE start can take up to 30 minutes while it creates the persistent optimization cache."
     Write-Host "A RunPod 400 'timed out waiting for worker' response is retried until the $WarmTimeoutSeconds-second safety limit."
 

@@ -102,6 +102,17 @@ class RunPodConnectionContractTests(unittest.TestCase):
         command = START.build_model_command(ROOT, preload=True)
         self.assertEqual(command[-1], "--preload")
 
+    def test_gpu_specific_image_rejects_wrong_cuda_capability(self):
+        with patch.dict(
+            os.environ,
+            {"JOYOMNI_EXPECTED_CUDA_CAPABILITY": "12.0"},
+            clear=True,
+        ):
+            self.assertTrue(
+                START.cuda_capability_matches((12, 0), "RTX PRO 6000 Blackwell")
+            )
+            self.assertFalse(START.cuda_capability_matches((9, 0), "H200"))
+
     def test_runpod_ping_is_internal_and_checks_public_health(self):
         text = (ROOT / "runpod" / "health_server.py").read_text()
         self.assertIn('@app.get("/ping")', text)
@@ -214,6 +225,35 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("const IDENTITY_UPLINK_KEYFRAME_INTERVAL = 4;", html)
         self.assertIn("const IDENTITY_UPLINK_BITRATE_MULTIPLIER = 1.5;", html)
         self.assertIn('autoQuality = true; autoQTier = 0;', html)
+
+    def test_rtx_pro_6000_uses_controlled_480p_24fps_preset(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        workflow = (
+            ROOT / ".github" / "workflows" / "build-runpod-image.yml"
+        ).read_text()
+        h200_workflow = (
+            ROOT / ".github" / "workflows" / "build-runpod-h200.yml"
+        ).read_text()
+
+        self.assertIn("TORCH_CUDA_ARCH_LIST=12.0", dockerfile)
+        self.assertIn("JOYOMNI_OPS_CUDA_ARCHS=120a", dockerfile)
+        self.assertIn("JOYOMNI_EXPECTED_CUDA_CAPABILITY=12.0", dockerfile)
+        self.assertIn("JOYOMNI_WIDTH=840", dockerfile)
+        self.assertIn("JOYOMNI_HEIGHT=480", dockerfile)
+        self.assertIn("JOYOMNI_FPS=24", dockerfile)
+        self.assertIn("JOYOMNI_NUM_INFERENCE_STEPS=2", dockerfile)
+        self.assertIn("JOYOMNI_VAE_COMPILE_STRICT=1", dockerfile)
+        self.assertIn("JOYOMNI_LOAD_WARMUP_STRICT=1", dockerfile)
+        self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=1", dockerfile)
+        self.assertIn(
+            "JOYOMNI_CACHE_ROOT=/runpod-volume/joyai/cache/"
+            "rtx-pro-6000-blackwell-torch291-cu128",
+            dockerfile,
+        )
+        self.assertIn('runpod-rtx-pro-6000-image-${{ github.ref }}', workflow)
+        self.assertIn('rtx-pro-6000-sha-${{ github.sha }}', workflow)
+        self.assertIn("push:", workflow)
+        self.assertNotIn("  push:\n", h200_workflow)
 
     def test_reference_initialization_is_not_cancelled_by_live_frame_guard(self):
         server = (

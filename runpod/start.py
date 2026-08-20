@@ -36,6 +36,50 @@ def env_enabled(name: str, *, default: bool) -> bool:
     raise ValueError(f"{name} must be one of: {choices}")
 
 
+def cuda_capability_matches(
+    actual: tuple[int, int] | None = None,
+    device_name: str | None = None,
+) -> bool:
+    """Fail early when a GPU-specific image is assigned to the wrong GPU.
+
+    CUDA extension failures appear much later in startup and still consume
+    billed GPU time.  A targeted image can set
+    ``JOYOMNI_EXPECTED_CUDA_CAPABILITY`` to make the mismatch explicit before
+    the 32.5 GB checkpoint is loaded.
+    """
+    expected = os.getenv("JOYOMNI_EXPECTED_CUDA_CAPABILITY", "").strip()
+    if not expected:
+        return True
+
+    if actual is None:
+        import torch
+
+        if not torch.cuda.is_available():
+            print(
+                "This image requires a CUDA GPU, but CUDA is unavailable.",
+                flush=True,
+            )
+            return False
+        actual = torch.cuda.get_device_capability(0)
+        device_name = torch.cuda.get_device_name(0)
+
+    actual_text = f"{actual[0]}.{actual[1]}"
+    print(
+        "JoyAI CUDA target check: "
+        f"expected sm_{expected.replace('.', '')}, got sm_{actual_text.replace('.', '')} "
+        f"({device_name or 'unknown GPU'}).",
+        flush=True,
+    )
+    if actual_text == expected:
+        return True
+
+    print(
+        "Refusing to load a GPU-specific image on incompatible hardware.",
+        flush=True,
+    )
+    return False
+
+
 def required_checkpoint_items(checkpoint_root: Path) -> list[Path]:
     return [
         checkpoint_root
@@ -64,6 +108,9 @@ def build_model_command(repository_root: Path, *, preload: bool) -> list[str]:
 
 def main() -> int:
     repository_root = REPOSITORY_ROOT
+    if not cuda_capability_matches():
+        return 1
+
     checkpoint_root = Path(
         os.getenv(
             "JOYOMNI_CKPT_ROOT",

@@ -342,6 +342,15 @@ The server defaults to **840×480 @ 24 FPS** (480p). Override per GPU with `JOYO
   JOYOMNI_WIDTH=1248 JOYOMNI_HEIGHT=720 JOYOMNI_FPS=16 bash deploy/run_server.sh
   ```
 
+  The RunPod Blackwell image is published as
+  `ghcr.io/samuellucky2424-afk/joyai-video-edit:runpod-rtx-pro-6000`.
+  It is compiled only for compute capability 12.0 (`sm_120a`) and fails before
+  loading the checkpoint if RunPod assigns incompatible hardware. Its
+  TorchInductor, Triton, and CUDA cache is isolated under
+  `/runpod-volume/joyai/cache/rtx-pro-6000-blackwell-torch291-cu128`; do not
+  reuse the H200 cache directory. The image defaults to 840×480, 24 FPS, two
+  inference steps, compiled VAE, CUDA graphs, and no recording or online gate.
+
 - **RTX 5090** — coming soon.
 
 > The first launch is slow: PyTorch/Triton/CUDA kernels and the DiT attention path
