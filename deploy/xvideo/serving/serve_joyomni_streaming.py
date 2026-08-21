@@ -2248,3 +2248,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-inflight-chunks", type=int, default=2, help="Drop incoming frames while this many chunks are already in the pipeline (latency governor; pins display latency to ~N chunk periods). 2 keeps glass-to-glass latency low (~1 chunk) and prevents the session-start init stall from building a frame backlog (the 'ramp-up'); higher values buffer more (smoother under hiccups) at the cost of latency and a startup ramp. 0 disables. Overridable per session via the start payload's max_inflight_chunks.")
     parser.add_argument("--session-close-timeout-s", type=float, default=5.0, help="Best-effort session cleanup timeout during WS teardown.")
     parser.add_argument("--inference-lock-timeout-s", type=float, default=5.0, help="Max seconds to wait for the process-wide inference lock.")
+
+    parser.add_argument("--record-dir", type=str, default=None, help="Directory to record input/output mp4s into (per-session subfolder). Off if unset.")
+    parser.add_argument("--record-codec", type=str, default="libx264", help="Recording video codec (PyAV/ffmpeg name).")
+    parser.add_argument("--record-bitrate", type=int, default=8_000_000, help="Recording target bitrate in bits/sec.")
+    parser.add_argument("--record-segment-seconds", type=int, default=300, help="Roll to a new mp4 segment every N seconds of recorded frames.")
+    return parser
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
+
+def main() -> None:
+    import logging
+    logging.getLogger("torch.utils._sympy.interp").setLevel(logging.ERROR)
+    from xvideo.inductor_autotune_fix import install as _install_autotune_fix
+    _install_autotune_fix()
+    args = parse_args()
+    app = create_app(args)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", ws_max_size=32 * 1024 * 1024, ws_per_message_deflate=False, loop="uvloop")
+
+
+if __name__ == "__main__":
+    main()
