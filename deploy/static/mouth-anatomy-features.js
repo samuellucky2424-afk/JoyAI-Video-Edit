@@ -95,8 +95,6 @@ function pixelColor(data, offset) {
     luminance: 0.2126 * red + 0.7152 * green + 0.0722 * blue,
     saturation: maximum <= 1e-6 ? 0 : (maximum - minimum) / maximum,
     redGreen: red - green,
-    redBlue: red - blue,
-    channelSpread: maximum - minimum,
   };
 }
 
@@ -251,17 +249,31 @@ export function analyzeMouthAnatomy(
     const brightness = clamp01(
       (pixel.luminance - brightThreshold + 0.06) / 0.22,
     );
-    const neutrality = clamp01(1 - pixel.channelSpread / 0.16);
-    const redGreen = clamp01((pixel.redGreen - 0.018) / 0.14);
-    const redBlue = clamp01((pixel.redBlue - 0.012) / 0.18);
-    const redDominance = 0.65 * redGreen + 0.35 * redBlue;
+    const greenBlue = pixel.green - pixel.blue;
+    // Warm webcams make teeth yellow instead of channel-neutral.  The
+    // green/blue relationship remains a better separator: warm enamel keeps
+    // more green than blue, while pink tongue pixels keep green and blue much
+    // closer together.  This axis is also relative to red/green separation so
+    // it continues to work under red-biased room lighting.
+    const warmEnamelAxis = clamp01(
+      (greenBlue - 0.15 * pixel.redGreen + 0.02) / 0.08,
+    );
+    const enamelRedBalance = clamp01((0.24 - pixel.redGreen) / 0.18);
+    const enamelChroma = enamelRedBalance * (0.20 + 0.80 * warmEnamelAxis);
+    const redSignal = clamp01((pixel.redGreen - 0.035) / 0.18);
+    const pinkAxis = 1 - warmEnamelAxis;
     const colorfulness = clamp01((pixel.saturation - 0.055) / 0.26);
     const visibleColor = clamp01(
       (pixel.luminance - darkThreshold + 0.025) / 0.18,
     );
+    const rawTeeth = brightness * (0.25 + 0.75 * enamelChroma);
+    const rawTongue = redSignal
+      * (0.25 + 0.75 * pinkAxis)
+      * (0.58 + 0.42 * colorfulness)
+      * visibleColor;
     return {
-      teeth: brightness * neutrality * clamp01(1 - 1.35 * redDominance),
-      tongue: redDominance * (0.58 + 0.42 * colorfulness) * visibleColor,
+      teeth: rawTeeth * clamp01(1 - 0.65 * rawTongue),
+      tongue: rawTongue * clamp01(1 - 0.65 * rawTeeth),
       cavity: clamp01((darkThreshold + 0.10 - pixel.luminance) / 0.16),
     };
   }

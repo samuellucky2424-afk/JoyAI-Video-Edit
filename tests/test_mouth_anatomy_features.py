@@ -167,8 +167,12 @@ function frame(mode) {{
       if (inner) {{
         color = [18, 8, 11];
         if (mode === "teeth" && normalizedY < 0.58) color = [238, 232, 214];
+        if (mode === "warmTeeth" && normalizedY < 0.72) color = [205, 184, 168];
         if ((mode === "tongue" || mode === "protruding") && normalizedY > 0.28) {{
           color = [236, 170, 177];
+        }}
+        if (mode === "warmTongue" && normalizedY > 0.28) {{
+          color = [185, 147, 144];
         }}
       }}
       if (
@@ -195,7 +199,19 @@ function frame(mode) {{
 }}
 
 const teeth = analyzeMouthAnatomy(frame("teeth"), landmarks, null, {{ jawOpen: 0.7 }});
+const warmTeeth = analyzeMouthAnatomy(
+  frame("warmTeeth"),
+  landmarks,
+  null,
+  {{ jawOpen: 0.18 }},
+);
 const tongue = analyzeMouthAnatomy(frame("tongue"), landmarks, null, {{ jawOpen: 0.7 }});
+const warmTongue = analyzeMouthAnatomy(
+  frame("warmTongue"),
+  landmarks,
+  null,
+  {{ jawOpen: 0.7 }},
+);
 const protruding = analyzeMouthAnatomy(
   frame("protruding"),
   landmarks,
@@ -204,7 +220,15 @@ const protruding = analyzeMouthAnatomy(
 );
 const chin = analyzeMouthAnatomy(frame("chin"), landmarks, null, {{ jawOpen: 0.9 }});
 const cavity = analyzeMouthAnatomy(frame("cavity"), landmarks, null, {{ jawOpen: 0.7 }});
-process.stdout.write(JSON.stringify({{ teeth, tongue, protruding, chin, cavity }}));
+process.stdout.write(JSON.stringify({{
+  teeth,
+  warmTeeth,
+  tongue,
+  warmTongue,
+  protruding,
+  chin,
+  cavity,
+}}));
 """
         completed = subprocess.run(
             [shutil.which("node"), "--input-type=module", "-e", script],
@@ -215,15 +239,21 @@ process.stdout.write(JSON.stringify({{ teeth, tongue, protruding, chin, cavity }
         )
         result = json.loads(completed.stdout)
         teeth = result["teeth"]["region_evidence"]
+        warm_teeth = result["warmTeeth"]["region_evidence"]
         tongue = result["tongue"]["region_evidence"]
+        warm_tongue = result["warmTongue"]["region_evidence"]
         protruding = result["protruding"]["region_evidence"]
         chin = result["chin"]["region_evidence"]
         cavity = result["cavity"]["region_evidence"]
 
         self.assertGreater(teeth["teeth"], 0.35)
         self.assertGreater(teeth["teeth"], teeth["tongue"])
+        self.assertGreater(warm_teeth["teeth"], 0.35)
+        self.assertGreater(warm_teeth["teeth"], warm_teeth["tongue"] + 0.15)
         self.assertGreater(tongue["tongue"], 0.35)
         self.assertGreater(tongue["tongue"], tongue["teeth"] + 0.15)
+        self.assertGreater(warm_tongue["tongue"], 0.35)
+        self.assertGreater(warm_tongue["tongue"], warm_tongue["teeth"] + 0.15)
         self.assertGreater(protruding["tongue"], 0.45)
         self.assertGreater(protruding["tongue"], protruding["teeth"] + 0.15)
         self.assertLess(chin["tongue"], 0.20)
