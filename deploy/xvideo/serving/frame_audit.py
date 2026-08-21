@@ -54,6 +54,7 @@ class FrameAudit:
         "mouth_roi",
         "mouth_geometry",
         "mouth_blendshapes",
+        "mouth_anatomy",
         "mouth_tracker_processed_total",
         "mouth_tracker_drop_total",
     )
@@ -67,6 +68,7 @@ class FrameAudit:
         "roi",
         "geometry",
         "blendshapes",
+        "anatomy",
         "significant",
         "processed_total",
         "drop_total",

@@ -9,6 +9,10 @@ import {
   FaceLandmarker,
   FilesetResolver,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
+import {
+  analyzeMouthAnatomy,
+  unavailableMouthAnatomy,
+} from "/static/mouth-anatomy-features.js";
 
 const WASM_ROOT =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
@@ -47,6 +51,9 @@ let processing = false;
 let smoothedRoi = null;
 let previousLipPoints = null;
 let previousJawOpen = null;
+let previousAnatomyEvidence = null;
+let anatomyCanvas = null;
+let anatomyContext = null;
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
@@ -173,6 +180,25 @@ function resetTracking() {
   smoothedRoi = null;
   previousLipPoints = null;
   previousJawOpen = null;
+  previousAnatomyEvidence = null;
+}
+
+function anatomyFrame(bitmap) {
+  if (typeof OffscreenCanvas === "undefined") return null;
+  const width = Math.trunc(Number(bitmap?.width) || 0);
+  const height = Math.trunc(Number(bitmap?.height) || 0);
+  if (width <= 0 || height <= 0) return null;
+  if (!anatomyCanvas) {
+    anatomyCanvas = new OffscreenCanvas(width, height);
+    anatomyContext = anatomyCanvas.getContext("2d", { willReadFrequently: true });
+  }
+  if (!anatomyContext) return null;
+  if (anatomyCanvas.width !== width || anatomyCanvas.height !== height) {
+    anatomyCanvas.width = width;
+    anatomyCanvas.height = height;
+  }
+  anatomyContext.drawImage(bitmap, 0, 0, width, height);
+  return anatomyContext.getImageData(0, 0, width, height);
 }
 
 async function detectFrame(data) {
@@ -202,6 +228,7 @@ async function detectFrame(data) {
         facePresent: false,
         delegate,
         inferenceMs: performance.now() - startedAt,
+        anatomy: unavailableMouthAnatomy(),
       });
       return;
     }
@@ -213,6 +240,17 @@ async function detectFrame(data) {
     const jawDelta = previousJawOpen === null ? 0 : Math.abs(jawOpen - previousJawOpen);
     previousJawOpen = jawOpen;
     const significant = motion >= 0.035 || jawDelta >= 0.08;
+    let anatomy = unavailableMouthAnatomy();
+    let anatomyError = null;
+    try {
+      const frame = anatomyFrame(bitmap);
+      anatomy = frame
+        ? analyzeMouthAnatomy(frame, landmarks, previousAnatomyEvidence)
+        : anatomy;
+    } catch (error) {
+      anatomyError = error instanceof Error ? error.message : String(error);
+    }
+    previousAnatomyEvidence = anatomy.available ? anatomy.region_evidence : null;
 
     self.postMessage({
       type: "result",
@@ -235,6 +273,8 @@ async function detectFrame(data) {
         : null,
       blendshapes,
       significant,
+      anatomy,
+      anatomyError,
     });
   } catch (error) {
     self.postMessage({
