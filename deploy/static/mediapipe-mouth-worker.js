@@ -237,6 +237,9 @@ async function detectFrame(data) {
     const blendshapes = blendshapeMap(result);
     const motion = mouth ? lipMotion(mouth.lipPoints, mouth.lipWidth) : 0;
     const jawOpen = Number(blendshapes.jawOpen || 0);
+    const lipAspect = mouth
+      ? mouth.lipHeight / Math.max(mouth.lipWidth, 1e-6)
+      : 0;
     const jawDelta = previousJawOpen === null ? 0 : Math.abs(jawOpen - previousJawOpen);
     previousJawOpen = jawOpen;
     const significant = motion >= 0.035 || jawDelta >= 0.08;
@@ -249,7 +252,7 @@ async function detectFrame(data) {
             frame,
             landmarks,
             previousAnatomyEvidence,
-            { jawOpen },
+            { jawOpen, lipAspect },
           )
         : anatomy;
     } catch (error) {
@@ -271,7 +274,7 @@ async function detectFrame(data) {
         ? {
             lipWidth: mouth.lipWidth,
             lipHeight: mouth.lipHeight,
-            lipAspect: mouth.lipHeight / Math.max(mouth.lipWidth, 1e-6),
+            lipAspect,
             motion,
             jawDelta,
           }

@@ -31,6 +31,19 @@ function roundedScore(value) {
   return Number(clamp01(value).toFixed(6));
 }
 
+export function roundCavityTongueSuppression(
+  lipAspect,
+  cavityEvidence,
+  teethEvidence,
+) {
+  const roundOpeningGate = clamp01((Number(lipAspect || 0) - 1.75) / 0.25);
+  const dominantCavityGate = clamp01((Number(cavityEvidence || 0) - 0.82) / 0.15);
+  const enamelAbsenceGate = clamp01((0.18 - Number(teethEvidence || 0)) / 0.18);
+  return clamp01(
+    1 - roundOpeningGate * dominantCavityGate * enamelAbsenceGate,
+  );
+}
+
 export function unavailableMouthAnatomy() {
   return {
     schema_version: MOUTH_ANATOMY_SCHEMA_VERSION,
@@ -163,6 +176,7 @@ export function analyzeMouthAnatomy(
   const innerCenterX = (innerLeft + innerRight) * 0.5;
   const outerHeight = Math.max(1, bottom - top + 1);
   const jawOpen = clamp01(options?.jawOpen);
+  const lipAspect = Math.max(0, Number(options?.lipAspect) || 0);
   const extensionEnabled = jawOpen >= 0.08 && innerArea >= outerArea * 0.055;
   const extensionTop = innerTop + innerHeight * 0.42;
   const extensionBottom = Math.min(
@@ -346,8 +360,19 @@ export function analyzeMouthAnatomy(
   const cavityReliefGate = clamp01((0.90 - cavityEvidence) / 0.25);
   const substantiveTongueGate = clamp01((innerTongueEvidence - 0.55) / 0.30);
   const tongueVisibilityGate = Math.max(cavityReliefGate, substantiveTongueGate);
+  // A rounded O-shaped opening can expose a narrow warm lower-lip rim while
+  // the rest of the inner ROI is an almost pure dark cavity.  Head turns can
+  // make that rim temporarily large enough to look like tongue.  Use the
+  // MediaPipe lip aspect only when cavity is dominant and enamel is absent;
+  // the user's real tongue poses are wider, less cavity-dominant openings.
+  const roundCavitySuppression = roundCavityTongueSuppression(
+    lipAspect,
+    cavityEvidence,
+    teethEvidence,
+  );
   const tongueEvidence = Math.max(innerTongueEvidence, extensionTongueEvidence)
-    * tongueVisibilityGate;
+    * tongueVisibilityGate
+    * roundCavitySuppression;
 
   const lipContrast = Math.abs(lipLuminance.mean - interiorLuminance.mean);
   const regionEvidence = {

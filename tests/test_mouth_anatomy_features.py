@@ -28,6 +28,7 @@ class MouthAnatomyFeatureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("analyzeMouthAnatomy", worker)
+        self.assertIn("{ jawOpen, lipAspect }", worker)
         self.assertIn("anatomy: result.anatomy || null", html)
         self.assertIn("mouth_anatomy: available ?", html)
         self.assertIn('@app.get("/static/mouth-anatomy-features.js")', server)
@@ -133,6 +134,7 @@ import {{
   analyzeMouthAnatomy,
   INNER_LIP_INDICES,
   OUTER_LIP_INDICES,
+  roundCavityTongueSuppression,
 }} from {json.dumps(FEATURES_PATH.as_uri())};
 
 const width = 128;
@@ -232,9 +234,15 @@ const rimCavity = analyzeMouthAnatomy(
   frame("rimCavity"),
   landmarks,
   null,
-  {{ jawOpen: 0.67 }},
+  {{ jawOpen: 0.24, lipAspect: 2.20 }},
 );
 const closed = analyzeMouthAnatomy(frame("cavity"), landmarks, null, {{ jawOpen: 0.002 }});
+const observedMovingOSuppression = roundCavityTongueSuppression(
+  2.0051162781765,
+  0.948531,
+  0,
+);
+const realTongueSuppression = roundCavityTongueSuppression(1.448277, 0.268255, 0.274252);
 process.stdout.write(JSON.stringify({{
   teeth,
   warmTeeth,
@@ -245,6 +253,8 @@ process.stdout.write(JSON.stringify({{
   cavity,
   rimCavity,
   closed,
+  observedMovingOSuppression,
+  realTongueSuppression,
 }}));
 """
         completed = subprocess.run(
@@ -279,6 +289,8 @@ process.stdout.write(JSON.stringify({{
         self.assertGreater(cavity["oral_cavity"], 0.35)
         self.assertGreater(rim_cavity["oral_cavity"], 0.50)
         self.assertLess(rim_cavity["tongue"], 0.15)
+        self.assertLess(result["observedMovingOSuppression"], 0.20)
+        self.assertEqual(result["realTongueSuppression"], 1)
         self.assertGreater(closed["lips"], 0.35)
         self.assertLess(closed["teeth"], 0.05)
         self.assertLess(closed["tongue"], 0.05)
