@@ -339,7 +339,15 @@ export function analyzeMouthAnatomy(
     innerVisibilityGate,
     clamp01((teethEvidence - 0.12) / 0.38),
   );
-  const tongueEvidence = Math.max(innerTongueEvidence, extensionTongueEvidence);
+  // When a dark cavity strongly dominates, a thin pink inner-lip rim must not
+  // be promoted to a full tongue by either the inner or extension path.  A
+  // genuine tongue occupies enough of the ROI to keep cavity evidence below
+  // this narrow suppression range.
+  const cavityReliefGate = clamp01((0.90 - cavityEvidence) / 0.25);
+  const substantiveTongueGate = clamp01((innerTongueEvidence - 0.55) / 0.30);
+  const tongueVisibilityGate = Math.max(cavityReliefGate, substantiveTongueGate);
+  const tongueEvidence = Math.max(innerTongueEvidence, extensionTongueEvidence)
+    * tongueVisibilityGate;
 
   const lipContrast = Math.abs(lipLuminance.mean - interiorLuminance.mean);
   const regionEvidence = {

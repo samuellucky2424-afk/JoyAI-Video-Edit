@@ -179,6 +179,9 @@ function frame(mode) {{
         if (mode === "warmTongue" && normalizedY > 0.28) {{
           color = [185, 147, 144];
         }}
+        if (mode === "rimCavity" && normalizedY > 0.82) {{
+          color = [185, 147, 144];
+        }}
       }}
       if (
         (mode === "protruding" || mode === "chin")
@@ -225,6 +228,12 @@ const protruding = analyzeMouthAnatomy(
 );
 const chin = analyzeMouthAnatomy(frame("chin"), landmarks, null, {{ jawOpen: 0.9 }});
 const cavity = analyzeMouthAnatomy(frame("cavity"), landmarks, null, {{ jawOpen: 0.7 }});
+const rimCavity = analyzeMouthAnatomy(
+  frame("rimCavity"),
+  landmarks,
+  null,
+  {{ jawOpen: 0.67 }},
+);
 const closed = analyzeMouthAnatomy(frame("cavity"), landmarks, null, {{ jawOpen: 0.002 }});
 process.stdout.write(JSON.stringify({{
   teeth,
@@ -234,6 +243,7 @@ process.stdout.write(JSON.stringify({{
   protruding,
   chin,
   cavity,
+  rimCavity,
   closed,
 }}));
 """
@@ -252,6 +262,7 @@ process.stdout.write(JSON.stringify({{
         protruding = result["protruding"]["region_evidence"]
         chin = result["chin"]["region_evidence"]
         cavity = result["cavity"]["region_evidence"]
+        rim_cavity = result["rimCavity"]["region_evidence"]
         closed = result["closed"]["region_evidence"]
 
         self.assertGreater(teeth["teeth"], 0.35)
@@ -266,6 +277,8 @@ process.stdout.write(JSON.stringify({{
         self.assertGreater(protruding["tongue"], protruding["teeth"] + 0.15)
         self.assertLess(chin["tongue"], 0.20)
         self.assertGreater(cavity["oral_cavity"], 0.35)
+        self.assertGreater(rim_cavity["oral_cavity"], 0.50)
+        self.assertLess(rim_cavity["tongue"], 0.15)
         self.assertGreater(closed["lips"], 0.35)
         self.assertLess(closed["teeth"], 0.05)
         self.assertLess(closed["tongue"], 0.05)
