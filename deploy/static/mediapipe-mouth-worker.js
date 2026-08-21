@@ -130,10 +130,15 @@ function lipMotion(currentPoints, lipWidth) {
 }
 
 async function createLandmarker(modelUrl, requestedDelegate) {
-  const vision = await FilesetResolver.forVisionTasks(WASM_ROOT);
+  const vision = await FilesetResolver.forVisionTasks(WASM_ROOT, true);
+  const modelResponse = await fetch(modelUrl || DEFAULT_MODEL_URL);
+  if (!modelResponse.ok) {
+    throw new Error(`Failed to load MediaPipe face model: HTTP ${modelResponse.status}`);
+  }
+  const modelBuffer = await modelResponse.arrayBuffer();
   return FaceLandmarker.createFromOptions(vision, {
     baseOptions: {
-      modelAssetPath: modelUrl || DEFAULT_MODEL_URL,
+      modelAssetBuffer: new Uint8Array(modelBuffer),
       delegate: requestedDelegate,
     },
     runningMode: "VIDEO",
