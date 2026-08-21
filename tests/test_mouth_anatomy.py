@@ -14,7 +14,7 @@ SPEC.loader.exec_module(MOUTH_ANATOMY)
 def valid_payload():
     return {
         "schema_version": 1,
-        "method": "landmark_aligned_roi_v1",
+        "method": "landmark_aligned_feature_encoder_v2",
         "available": True,
         "roi_confidence": 0.92,
         "region_evidence": {
@@ -75,7 +75,7 @@ class MouthAnatomyContractTests(unittest.TestCase):
     def test_unavailable_roi_cannot_influence_frame_selection(self):
         unavailable = {
             "schema_version": 1,
-            "method": "landmark_aligned_roi_v1",
+            "method": "landmark_aligned_feature_encoder_v2",
             "available": False,
             "roi_confidence": 0.0,
             "region_evidence": {

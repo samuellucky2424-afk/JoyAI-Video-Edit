@@ -245,7 +245,12 @@ async function detectFrame(data) {
     try {
       const frame = anatomyFrame(bitmap);
       anatomy = frame
-        ? analyzeMouthAnatomy(frame, landmarks, previousAnatomyEvidence)
+        ? analyzeMouthAnatomy(
+            frame,
+            landmarks,
+            previousAnatomyEvidence,
+            { jawOpen },
+          )
         : anatomy;
     } catch (error) {
       anatomyError = error instanceof Error ? error.message : String(error);

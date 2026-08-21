@@ -121,6 +121,114 @@ process.stdout.write(JSON.stringify({{ first, second, missing, clipped }}));
         self.assertFalse(missing["significant"])
         self.assertFalse(clipped["available"])
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for JS feature tests")
+    def test_spatial_encoder_separates_overexposed_tongue_from_white_teeth(self):
+        script = f"""
+import {{
+  analyzeMouthAnatomy,
+  INNER_LIP_INDICES,
+  OUTER_LIP_INDICES,
+}} from {json.dumps(FEATURES_PATH.as_uri())};
+
+const width = 128;
+const height = 96;
+const centerX = 0.5;
+const centerY = 0.38;
+const landmarks = Array.from({{ length: 468 }}, () => ({{ x: NaN, y: NaN, z: 0 }}));
+
+function setEllipse(indices, radiusX, radiusY) {{
+  indices.forEach((landmarkIndex, pointIndex) => {{
+    const angle = Math.PI + 2 * Math.PI * pointIndex / indices.length;
+    landmarks[landmarkIndex] = {{
+      x: centerX + radiusX * Math.cos(angle),
+      y: centerY + radiusY * Math.sin(angle),
+      z: 0,
+    }};
+  }});
+}}
+setEllipse(OUTER_LIP_INDICES, 0.16, 0.10);
+setEllipse(INNER_LIP_INDICES, 0.105, 0.055);
+
+function ellipseAt(x, y, cx, cy, radiusX, radiusY) {{
+  const dx = (x / width - cx) / radiusX;
+  const dy = (y / height - cy) / radiusY;
+  return dx * dx + dy * dy <= 1;
+}}
+
+function frame(mode) {{
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {{
+    for (let x = 0; x < width; x += 1) {{
+      let color = [118, 76, 62];
+      const outer = ellipseAt(x + 0.5, y + 0.5, centerX, centerY, 0.16, 0.10);
+      const inner = ellipseAt(x + 0.5, y + 0.5, centerX, centerY, 0.105, 0.055);
+      const normalizedY = (y / height - (centerY - 0.055)) / 0.11;
+      if (outer && !inner) color = [165, 48, 70];
+      if (inner) {{
+        color = [18, 8, 11];
+        if (mode === "teeth" && normalizedY < 0.58) color = [238, 232, 214];
+        if ((mode === "tongue" || mode === "protruding") && normalizedY > 0.28) {{
+          color = [236, 170, 177];
+        }}
+      }}
+      if (
+        (mode === "protruding" || mode === "chin")
+        && ellipseAt(
+          x + 0.5,
+          y + 0.5,
+          centerX,
+          centerY + (mode === "chin" ? 0.27 : 0.16),
+          0.07,
+          0.13,
+        )
+      ) {{
+        color = [236, 170, 177];
+      }}
+      const offset = (y * width + x) * 4;
+      data[offset] = color[0];
+      data[offset + 1] = color[1];
+      data[offset + 2] = color[2];
+      data[offset + 3] = 255;
+    }}
+  }}
+  return {{ width, height, data }};
+}}
+
+const teeth = analyzeMouthAnatomy(frame("teeth"), landmarks, null, {{ jawOpen: 0.7 }});
+const tongue = analyzeMouthAnatomy(frame("tongue"), landmarks, null, {{ jawOpen: 0.7 }});
+const protruding = analyzeMouthAnatomy(
+  frame("protruding"),
+  landmarks,
+  null,
+  {{ jawOpen: 0.9 }},
+);
+const chin = analyzeMouthAnatomy(frame("chin"), landmarks, null, {{ jawOpen: 0.9 }});
+const cavity = analyzeMouthAnatomy(frame("cavity"), landmarks, null, {{ jawOpen: 0.7 }});
+process.stdout.write(JSON.stringify({{ teeth, tongue, protruding, chin, cavity }}));
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout)
+        teeth = result["teeth"]["region_evidence"]
+        tongue = result["tongue"]["region_evidence"]
+        protruding = result["protruding"]["region_evidence"]
+        chin = result["chin"]["region_evidence"]
+        cavity = result["cavity"]["region_evidence"]
+
+        self.assertGreater(teeth["teeth"], 0.35)
+        self.assertGreater(teeth["teeth"], teeth["tongue"])
+        self.assertGreater(tongue["tongue"], 0.35)
+        self.assertGreater(tongue["tongue"], tongue["teeth"] + 0.15)
+        self.assertGreater(protruding["tongue"], 0.45)
+        self.assertGreater(protruding["tongue"], protruding["teeth"] + 0.15)
+        self.assertLess(chin["tongue"], 0.20)
+        self.assertGreater(cavity["oral_cavity"], 0.35)
+
 
 if __name__ == "__main__":
     unittest.main()

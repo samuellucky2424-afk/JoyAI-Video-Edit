@@ -7,7 +7,7 @@
  */
 
 export const MOUTH_ANATOMY_SCHEMA_VERSION = 1;
-export const MOUTH_ANATOMY_METHOD = "landmark_aligned_roi_v1";
+export const MOUTH_ANATOMY_METHOD = "landmark_aligned_feature_encoder_v2";
 export const MOUTH_ANATOMY_REGIONS = ["lips", "teeth", "tongue", "oral_cavity"];
 
 // Ordered loops from MediaPipe FACE_LANDMARKS_LIPS.
@@ -94,7 +94,9 @@ function pixelColor(data, offset) {
     blue,
     luminance: 0.2126 * red + 0.7152 * green + 0.0722 * blue,
     saturation: maximum <= 1e-6 ? 0 : (maximum - minimum) / maximum,
-    redness: red - Math.max(green, blue),
+    redGreen: red - green,
+    redBlue: red - blue,
+    channelSpread: maximum - minimum,
   };
 }
 
@@ -116,7 +118,12 @@ function appearanceMotion(current, previous) {
   return Math.max(...changes, 0);
 }
 
-export function analyzeMouthAnatomy(image, landmarks, previousRegionEvidence = null) {
+export function analyzeMouthAnatomy(
+  image,
+  landmarks,
+  previousRegionEvidence = null,
+  options = {},
+) {
   const width = Math.trunc(Number(image?.width) || 0);
   const height = Math.trunc(Number(image?.height) || 0);
   const data = image?.data;
@@ -130,6 +137,8 @@ export function analyzeMouthAnatomy(image, landmarks, previousRegionEvidence = n
 
   const xs = outer.map((point) => point.x);
   const ys = outer.map((point) => point.y);
+  const innerXs = inner.map((point) => point.x);
+  const innerYs = inner.map((point) => point.y);
   const left = Math.max(0, Math.floor(Math.min(...xs)));
   const right = Math.min(width - 1, Math.ceil(Math.max(...xs)));
   const top = Math.max(0, Math.floor(Math.min(...ys)));
@@ -145,18 +154,56 @@ export function analyzeMouthAnatomy(image, landmarks, previousRegionEvidence = n
   if (inBoundsScore < 0.9) return unavailableMouthAnatomy();
   const lipPixels = [];
   const innerPixels = [];
+  const extensionPixels = [];
 
-  for (let y = top; y <= bottom; y += 1) {
+  const innerLeft = Math.min(...innerXs);
+  const innerRight = Math.max(...innerXs);
+  const innerTop = Math.min(...innerYs);
+  const innerBottom = Math.max(...innerYs);
+  const innerWidth = Math.max(1, innerRight - innerLeft);
+  const innerHeight = Math.max(1, innerBottom - innerTop);
+  const innerCenterX = (innerLeft + innerRight) * 0.5;
+  const outerHeight = Math.max(1, bottom - top + 1);
+  const jawOpen = clamp01(options?.jawOpen);
+  const extensionEnabled = jawOpen >= 0.08 && innerArea >= outerArea * 0.055;
+  const extensionTop = innerTop + innerHeight * 0.42;
+  const extensionBottom = Math.min(
+    height - 1,
+    Math.max(bottom, Math.ceil(bottom + outerHeight * 1.45)),
+  );
+  const scanBottom = extensionEnabled ? extensionBottom : bottom;
+
+  for (let y = top; y <= scanBottom; y += 1) {
     for (let x = left; x <= right; x += 1) {
       const sampleX = x + 0.5;
       const sampleY = y + 0.5;
-      if (!pointInPolygon(sampleX, sampleY, outer)) continue;
-      const color = pixelColor(data, (y * width + x) * 4);
-      if (pointInPolygon(sampleX, sampleY, inner)) {
-        innerPixels.push(color);
-      } else {
-        lipPixels.push(color);
+      const inOuter = pointInPolygon(sampleX, sampleY, outer);
+      if (inOuter) {
+        const color = {
+          ...pixelColor(data, (y * width + x) * 4),
+          x: sampleX,
+          y: sampleY,
+        };
+        if (pointInPolygon(sampleX, sampleY, inner)) {
+          innerPixels.push(color);
+        } else {
+          lipPixels.push(color);
+        }
+        continue;
       }
+      if (!extensionEnabled || sampleY < extensionTop || sampleY > extensionBottom) {
+        continue;
+      }
+      const progress = clamp01(
+        (sampleY - extensionTop) / Math.max(extensionBottom - extensionTop, 1),
+      );
+      const halfWidth = innerWidth * (0.48 - 0.12 * progress);
+      if (Math.abs(sampleX - innerCenterX) > halfWidth) continue;
+      extensionPixels.push({
+        ...pixelColor(data, (y * width + x) * 4),
+        x: sampleX,
+        y: sampleY,
+      });
     }
   }
 
@@ -183,42 +230,100 @@ export function analyzeMouthAnatomy(image, landmarks, previousRegionEvidence = n
   const available = roiConfidence >= 0.35;
   if (!available) return unavailableMouthAnatomy();
 
-  let teethCount = 0;
-  let tongueCount = 0;
-  let cavityCount = 0;
-  if (innerPixels.length >= MIN_INNER_PIXELS) {
-    const brightThreshold = Math.max(
-      0.58,
-      interiorLuminance.mean + 0.65 * interiorLuminance.deviation,
-    );
-    const darkThreshold = Math.min(
-      0.34,
-      interiorLuminance.mean - 0.45 * interiorLuminance.deviation,
-    );
+  const brightThreshold = Math.max(
+    0.50,
+    interiorLuminance.mean + 0.35 * interiorLuminance.deviation,
+  );
+  const darkThreshold = Math.min(
+    0.34,
+    interiorLuminance.mean - 0.45 * interiorLuminance.deviation,
+  );
 
+  let teethScoreTotal = 0;
+  let teethWeightTotal = 0;
+  let tongueScoreTotal = 0;
+  let tongueWeightTotal = 0;
+  let cavityScoreTotal = 0;
+  let cavityWeightTotal = 0;
+  let tongueSeed = 0;
+
+  function encodedPixelScores(pixel) {
+    const brightness = clamp01(
+      (pixel.luminance - brightThreshold + 0.06) / 0.22,
+    );
+    const neutrality = clamp01(1 - pixel.channelSpread / 0.16);
+    const redGreen = clamp01((pixel.redGreen - 0.018) / 0.14);
+    const redBlue = clamp01((pixel.redBlue - 0.012) / 0.18);
+    const redDominance = 0.65 * redGreen + 0.35 * redBlue;
+    const colorfulness = clamp01((pixel.saturation - 0.055) / 0.26);
+    const visibleColor = clamp01(
+      (pixel.luminance - darkThreshold + 0.025) / 0.18,
+    );
+    return {
+      teeth: brightness * neutrality * clamp01(1 - 1.35 * redDominance),
+      tongue: redDominance * (0.58 + 0.42 * colorfulness) * visibleColor,
+      cavity: clamp01((darkThreshold + 0.10 - pixel.luminance) / 0.16),
+    };
+  }
+
+  if (innerPixels.length >= MIN_INNER_PIXELS) {
     for (const pixel of innerPixels) {
-      if (pixel.luminance >= brightThreshold && pixel.saturation <= 0.34) {
-        teethCount += 1;
-      } else if (
-        pixel.redness >= 0.055
-        && pixel.saturation >= 0.16
-        && pixel.luminance > darkThreshold
-        && pixel.luminance < brightThreshold
-      ) {
-        tongueCount += 1;
-      } else if (pixel.luminance <= darkThreshold) {
-        cavityCount += 1;
-      }
+      const vertical = clamp01((pixel.y - innerTop) / innerHeight);
+      const upperPrior = clamp01((0.70 - vertical) / 0.42);
+      const lowerPrior = clamp01((vertical - 0.24) / 0.46);
+      const centralPrior = 0.35 + 0.65 * clamp01(1 - Math.abs(vertical - 0.55) / 0.55);
+      const scores = encodedPixelScores(pixel);
+      const teethWeight = 0.18 + 0.82 * upperPrior;
+      const tongueWeight = 0.16 + 0.84 * lowerPrior;
+
+      teethScoreTotal += scores.teeth * teethWeight;
+      teethWeightTotal += teethWeight;
+      tongueScoreTotal += scores.tongue * tongueWeight;
+      tongueWeightTotal += tongueWeight;
+      cavityScoreTotal += scores.cavity * centralPrior * (1 - 0.70 * scores.tongue);
+      cavityWeightTotal += centralPrior;
+      tongueSeed = Math.max(tongueSeed, scores.tongue * lowerPrior);
     }
   }
 
-  const innerCount = Math.max(innerPixels.length, 1);
+  let extensionTongueEvidence = 0;
+  if (extensionPixels.length && tongueSeed > 0) {
+    let extensionScoreTotal = 0;
+    let extensionWeightTotal = 0;
+    for (const pixel of extensionPixels) {
+      const scores = encodedPixelScores(pixel);
+      const vertical = clamp01(
+        (pixel.y - extensionTop) / Math.max(extensionBottom - extensionTop, 1),
+      );
+      const weight = 1 - 0.30 * vertical;
+      extensionScoreTotal += scores.tongue * weight;
+      extensionWeightTotal += weight;
+    }
+    const seedGate = clamp01((tongueSeed - 0.08) / 0.30);
+    const jawGate = clamp01((jawOpen - 0.06) / 0.34);
+    extensionTongueEvidence = clamp01(
+      ((extensionScoreTotal / Math.max(extensionWeightTotal, 1)) / 0.24)
+        * seedGate
+        * jawGate,
+    );
+  }
+
+  const innerTongueEvidence = clamp01(
+    (tongueScoreTotal / Math.max(tongueWeightTotal, 1)) / 0.25,
+  );
+  const teethEvidence = clamp01(
+    (teethScoreTotal / Math.max(teethWeightTotal, 1)) / 0.30,
+  );
+  const cavityEvidence = clamp01(
+    (cavityScoreTotal / Math.max(cavityWeightTotal, 1)) / 0.42,
+  );
+
   const lipContrast = Math.abs(lipLuminance.mean - interiorLuminance.mean);
   const regionEvidence = {
     lips: roundedScore(roiConfidence * (0.72 + 0.28 * clamp01(lipContrast / 0.25))),
-    teeth: roundedScore((teethCount / innerCount) / 0.45),
-    tongue: roundedScore((tongueCount / innerCount) / 0.55),
-    oral_cavity: roundedScore((cavityCount / innerCount) / 0.70),
+    teeth: roundedScore(teethEvidence),
+    tongue: roundedScore(Math.max(innerTongueEvidence, extensionTongueEvidence)),
+    oral_cavity: roundedScore(cavityEvidence),
   };
   const motion = roundedScore(appearanceMotion(regionEvidence, previousRegionEvidence));
 

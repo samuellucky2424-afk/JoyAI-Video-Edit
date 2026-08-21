@@ -1,9 +1,9 @@
 """Validated metadata contract for landmark-aligned mouth appearance features.
 
 This module deliberately does not inspect frames or change JoyAI inference.  It
-defines the boundary for a later CPU/browser feature extractor so that every
-stage uses the same names and score semantics before the extractor is connected
-to frame retention.
+defines the validation boundary for the browser feature encoder so that every
+stage uses the same names and score semantics before the metadata is allowed to
+influence any future frame-retention decision.
 
 The four region values are evidence scores in the MediaPipe-aligned mouth ROI;
 they are not pixel-perfect semantic masks and they are not model conditioning.
@@ -18,7 +18,7 @@ from typing import Any
 
 
 MOUTH_ANATOMY_SCHEMA_VERSION = 1
-MOUTH_ANATOMY_METHOD = "landmark_aligned_roi_v1"
+MOUTH_ANATOMY_METHOD = "landmark_aligned_feature_encoder_v2"
 MOUTH_ANATOMY_REGIONS = ("lips", "teeth", "tongue", "oral_cavity")
 
 MOUTH_ANATOMY_REGION_MEANINGS = {
