@@ -330,12 +330,23 @@ export function analyzeMouthAnatomy(
     (cavityScoreTotal / Math.max(cavityWeightTotal, 1)) / 0.42,
   );
 
+  // A collapsed inner-lip polygon can still contain skin, shadow, or lip pixels
+  // that resemble tongue/cavity colors.  Suppress those inner-mouth signals
+  // unless MediaPipe reports a genuinely open jaw.  Teeth are the exception:
+  // a broad smile can expose strong enamel while jawOpen remains near zero.
+  const innerVisibilityGate = clamp01((jawOpen - 0.035) / 0.065);
+  const teethVisibilityGate = Math.max(
+    innerVisibilityGate,
+    clamp01((teethEvidence - 0.12) / 0.38),
+  );
+  const tongueEvidence = Math.max(innerTongueEvidence, extensionTongueEvidence);
+
   const lipContrast = Math.abs(lipLuminance.mean - interiorLuminance.mean);
   const regionEvidence = {
     lips: roundedScore(roiConfidence * (0.72 + 0.28 * clamp01(lipContrast / 0.25))),
-    teeth: roundedScore(teethEvidence),
-    tongue: roundedScore(Math.max(innerTongueEvidence, extensionTongueEvidence)),
-    oral_cavity: roundedScore(cavityEvidence),
+    teeth: roundedScore(teethEvidence * teethVisibilityGate),
+    tongue: roundedScore(tongueEvidence * innerVisibilityGate),
+    oral_cavity: roundedScore(cavityEvidence * innerVisibilityGate),
   };
   const motion = roundedScore(appearanceMotion(regionEvidence, previousRegionEvidence));
 

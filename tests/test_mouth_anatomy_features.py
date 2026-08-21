@@ -88,8 +88,13 @@ function frame(includeTeeth) {{
   return {{ width, height, data }};
 }}
 
-const first = analyzeMouthAnatomy(frame(true), landmarks);
-const second = analyzeMouthAnatomy(frame(false), landmarks, first.region_evidence);
+const first = analyzeMouthAnatomy(frame(true), landmarks, null, {{ jawOpen: 0.7 }});
+const second = analyzeMouthAnatomy(
+  frame(false),
+  landmarks,
+  first.region_evidence,
+  {{ jawOpen: 0.7 }},
+);
 const missing = analyzeMouthAnatomy(frame(true), []);
 const clippedLandmarks = landmarks.map((point) => ({{ ...point, x: point.x + 0.7 }}));
 const clipped = analyzeMouthAnatomy(frame(true), clippedLandmarks);
@@ -203,7 +208,7 @@ const warmTeeth = analyzeMouthAnatomy(
   frame("warmTeeth"),
   landmarks,
   null,
-  {{ jawOpen: 0.18 }},
+  {{ jawOpen: 0.003 }},
 );
 const tongue = analyzeMouthAnatomy(frame("tongue"), landmarks, null, {{ jawOpen: 0.7 }});
 const warmTongue = analyzeMouthAnatomy(
@@ -220,6 +225,7 @@ const protruding = analyzeMouthAnatomy(
 );
 const chin = analyzeMouthAnatomy(frame("chin"), landmarks, null, {{ jawOpen: 0.9 }});
 const cavity = analyzeMouthAnatomy(frame("cavity"), landmarks, null, {{ jawOpen: 0.7 }});
+const closed = analyzeMouthAnatomy(frame("cavity"), landmarks, null, {{ jawOpen: 0.002 }});
 process.stdout.write(JSON.stringify({{
   teeth,
   warmTeeth,
@@ -228,6 +234,7 @@ process.stdout.write(JSON.stringify({{
   protruding,
   chin,
   cavity,
+  closed,
 }}));
 """
         completed = subprocess.run(
@@ -245,6 +252,7 @@ process.stdout.write(JSON.stringify({{
         protruding = result["protruding"]["region_evidence"]
         chin = result["chin"]["region_evidence"]
         cavity = result["cavity"]["region_evidence"]
+        closed = result["closed"]["region_evidence"]
 
         self.assertGreater(teeth["teeth"], 0.35)
         self.assertGreater(teeth["teeth"], teeth["tongue"])
@@ -258,6 +266,10 @@ process.stdout.write(JSON.stringify({{
         self.assertGreater(protruding["tongue"], protruding["teeth"] + 0.15)
         self.assertLess(chin["tongue"], 0.20)
         self.assertGreater(cavity["oral_cavity"], 0.35)
+        self.assertGreater(closed["lips"], 0.35)
+        self.assertLess(closed["teeth"], 0.05)
+        self.assertLess(closed["tongue"], 0.05)
+        self.assertLess(closed["oral_cavity"], 0.05)
 
 
 if __name__ == "__main__":
