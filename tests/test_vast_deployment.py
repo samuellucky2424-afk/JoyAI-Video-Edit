@@ -34,12 +34,15 @@ class VastDeploymentContractTests(unittest.TestCase):
         self.assertIn("eda14f342ef99c52485bbb8dc271c29b42298089", downloader)
         self.assertIn("/workspace/joyai/checkpoints", downloader)
 
-    def test_vast_workflow_is_manual_and_uses_the_vast_dockerfile(self) -> None:
+    def test_vast_workflow_is_isolated_and_uses_the_vast_dockerfile(self) -> None:
         workflow = (
             ROOT / ".github" / "workflows" / "build-vast-image.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", workflow)
-        self.assertNotIn("\n  push:", workflow)
+        self.assertIn("\n  push:", workflow)
+        self.assertIn("- vast-ai-serverless-rtx-pro-6000", workflow)
+        self.assertIn("- Dockerfile.vast", workflow)
+        self.assertIn("- vast/**", workflow)
         self.assertIn("file: ./Dockerfile.vast", workflow)
         self.assertIn(":vast-rtx-pro-6000", workflow)
 

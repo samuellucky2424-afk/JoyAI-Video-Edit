@@ -1,6 +1,13 @@
 name: Build Vast container image
 
 on:
+  push:
+    branches:
+      - vast-ai-serverless-rtx-pro-6000
+    paths:
+      - Dockerfile.vast
+      - vast/**
+      - .github/workflows/build-vast-image.yml
   workflow_dispatch:
 
 permissions:
