@@ -5,6 +5,7 @@ import asyncio
 import base64
 import io
 import json
+import math
 import os
 import queue
 import sys
@@ -32,6 +33,7 @@ from xvideo.serving.joyomni_streaming import (
     StreamingSettings,
     _module_device,
 )
+from xvideo.serving.frame_audit import FrameAudit
 
 DEFAULT_DIT_CKPT = ""
 DEFAULT_FACE_DETECTOR_ONNX = str(REPO_ROOT / "deps" / "checkpoints" / "face_detection_yunet_2023mar.onnx")
@@ -373,7 +375,7 @@ def _enhance_prompt_sync(
     pe_model: str | None,
 ) -> dict[str, Any]:
     started = time.time()
-    task_type = "v2v"
+    task_type = "rv2v" if ref_image is not None else "v2v"
     enhanced_prompt = raw_prompt
     error = None
     model = pe_model or DEFAULT_PE_MODEL
@@ -641,6 +643,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     app.state.inference_lock = threading.Lock()
     app.state.active_session = None
     app.state.ws_debug = {}
+    app.state.frame_audit = None
 
     app.state.session_gate = SessionGate()
 
@@ -727,6 +730,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 "runtime_loaded": app.state.runtime is not None,
                 "ws": getattr(app.state, "ws_debug", {}),
                 "session": session_debug,
+                "frame_audit": (
+                    app.state.frame_audit.snapshot()
+                    if getattr(app.state, "frame_audit", None) is not None
+                    else None
+                ),
             }
         )
 
@@ -827,6 +835,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         send_lock = asyncio.Lock()
         stop_output_pump = asyncio.Event()
         output_task: asyncio.Task[None] | None = None
+        frame_audit = FrameAudit()
+        app.state.frame_audit = frame_audit
 
         flow = {"recv": None, "at": 0.0, "dropped": 0, "congested": False,
                 "base": 0, "has_ack": False, "probe": 0, "clamped": False,
@@ -1376,12 +1386,66 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
                         raw_session_prompt = str(payload.get("prompt", args.prompt))
                         session_prompt = raw_session_prompt
+                        frame_audit = FrameAudit()
+                        app.state.frame_audit = frame_audit
                         try:
                             ref_image = _decode_ref_image(payload.get("ref_image"))
                         except Exception as exc:
                             await _send_json({"type": "error", "message": f"failed to decode ref image: {exc!r}"})
                             continue
+                        identity_lock = bool(payload.get("identity_lock", False)) and ref_image is not None
+                        if identity_lock:
+                            # Keep this directive server-side so bookmarked or
+                            # cached browser clients that still send the older
+                            # one-line identity prompt receive the same fidelity
+                            # treatment.  This asks the RV2V model to transfer
+                            # reference appearance across visible skin while
+                            # explicitly retaining the source performance.
+                            identity_directive = (
+                                "Use the reference person's identity, facial appearance, and natural skin tone "
+                                "consistently on all visible skin, including the face, neck, arms, and hands. "
+                                "Preserve the source video's pose, facial expression, eye motion, mouth shape, "
+                                "lip movements, and body motion."
+                            )
+                            if identity_directive not in session_prompt:
+                                session_prompt = f"{session_prompt.strip()} {identity_directive}".strip()
+                                print("#####[IDENTITY-PROMPT] appended skin and expression fidelity directive", flush=True)
+                        try:
+                            reference_kv_scale = float(
+                                payload.get(
+                                    "reference_kv_scale",
+                                    1.5 if identity_lock else 1.0,
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            await _send_json({
+                                "type": "error",
+                                "message": "reference_kv_scale must be a number",
+                            })
+                            continue
+                        if not math.isfinite(reference_kv_scale):
+                            await _send_json({
+                                "type": "error",
+                                "message": "reference_kv_scale must be finite",
+                            })
+                            continue
+                        # Keep the identity boost bounded.  The earlier 1.5x
+                        # experiment established the upper edge that worked in
+                        # live tests; accepting larger client values would risk
+                        # over-conditioning without evidence that it helps.
+                        reference_kv_scale = max(1.0, min(1.5, reference_kv_scale))
+                        if not identity_lock:
+                            reference_kv_scale = 1.0
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
+                        # The reference KV is the long-lived identity anchor.
+                        # Resetting the entire session drops both the generated
+                        # history and that anchor, causing a visible identity
+                        # discontinuity when the new session initializes. The
+                        # sliding temporal-ID window already bounds positions,
+                        # so an identity-locked RV2V session must not use the
+                        # legacy periodic hard reset.
+                        if identity_lock:
+                            kv_reset_frames = 0
                         output_quality = max(1, min(100, int(payload.get("output_quality", output_quality))))
                         lossless_mode = str(payload.get("source", "")) == "file"
                         _up_allow = args.uplink_codec == "auto" and not lossless_mode
@@ -1406,12 +1470,26 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         freeze_kv_on_static = bool(
                             payload.get("freeze_kv_on_static", args.freeze_kv_on_static)
                         )
+                        if identity_lock:
+                            # Whole-frame static detection can miss small mouth
+                            # and eye motion.  Keep the current source chunk in
+                            # the attention window for reference-person calls.
+                            freeze_kv_on_static = False
                         static_diff_thresh = float(
                             payload.get("static_diff_thresh", args.static_diff_thresh)
                         )
                         session_max_inflight = max(0, int(
                             payload.get("max_inflight_chunks", args.max_inflight_chunks) or 0
                         ))
+                        vae_posterior_mode = str(
+                            payload.get("vae_posterior_mode", "sample")
+                        ).strip().lower()
+                        if vae_posterior_mode not in {"sample", "mode"}:
+                            await _send_json({
+                                "type": "error",
+                                "message": "vae_posterior_mode must be 'sample' or 'mode'",
+                            })
+                            continue
                         use_pe = bool(payload.get("use_pe", args.use_pe)) and bool(os.environ.get("OPENAI_API_KEY"))
 
                         entry_gate = bool(payload.get("gate_enabled", True))
@@ -1493,6 +1571,27 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             static_diff_thresh=static_diff_thresh,
                             profile_timings=bool(payload.get("profile_timings", args.profile_timings)),
                             output_codec=output_codec,
+                            reference_kv_scale=reference_kv_scale,
+                            stabilize_identity_exposure=identity_lock,
+                            vae_posterior_mode=vae_posterior_mode,
+                            frame_audit=frame_audit,
+                        )
+
+                        session_config = {
+                            "width": session_settings.width,
+                            "height": session_settings.height,
+                            "fps": int(payload.get("fps", args.fps)),
+                            "num_inference_steps": session_settings.num_inference_steps,
+                            "use_pe": use_pe,
+                            "has_ref_image": ref_image is not None,
+                            "identity_lock": identity_lock,
+                            "reference_kv_scale": reference_kv_scale,
+                            "vae_posterior_mode": session_settings.vae_posterior_mode,
+                        }
+                        print(
+                            "#####[SESSION-CONFIG] "
+                            + json.dumps(session_config, separators=(",", ":"), sort_keys=True),
+                            flush=True,
                         )
 
                         print("#####[RESTART] creating new session", flush=True)
@@ -1510,6 +1609,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ws_debug["kv_reset_count"] = reset_count
                         ws_debug["frames_since_session_reset"] = frames_since_session_reset
                         ws_debug["has_ref_image"] = ref_image is not None
+                        ws_debug["identity_lock"] = identity_lock
+                        ws_debug["reference_kv_scale"] = reference_kv_scale
+                        ws_debug["session_config"] = session_config
                         ws_debug["last_message_type"] = "start"
                         await _send_json(
                             {
@@ -1520,6 +1622,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "output_codec": output_codec,
                                 "input_codec": input_codec,
                                 "ref_image": ref_image is not None,
+                                "identity_lock": identity_lock,
+                                "reference_kv_scale": reference_kv_scale,
+                                "vae_posterior_mode": session_settings.vae_posterior_mode,
+                                "num_inference_steps": session_settings.num_inference_steps,
+                                "frame_audit": True,
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,
                                 "pe_model": args.pe_model or DEFAULT_PE_MODEL,
@@ -1572,6 +1679,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         next_frame_meta = {
                             "seq": int(payload.get("seq", frames_in + 1)),
                             "t_capture_ms": float(payload.get("t_capture_ms", time.time() * 1000.0)),
+                            "capture_seq": payload.get("capture_seq"),
+                            "camera_frame_seq": payload.get("camera_frame_seq"),
+                            "client_skip_total": payload.get("client_skip_total"),
+                            "client_uplink_drop_total": payload.get("client_uplink_drop_total"),
+                            "client_drain_factor": payload.get("client_drain_factor"),
                         }
                     elif msg_type == "ack":
                         _recv = payload.get("recv")
@@ -1651,6 +1763,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 }
                 frame_meta["t_server_recv_ms"] = time.time() * 1000.0
                 next_frame_meta = None
+                frame_audit.observe("wire", [frame_meta])
 
                 if not input_sniffed:
                     input_sniffed = True
@@ -1670,6 +1783,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     if session_settings is not None and session_settings.profile_timings:
                         frame_meta["jpeg_decode_ms"] = (time.perf_counter() - _dec_t0) * 1000.0
                     if uplink_frame is None:
+                        frame_audit.drop("h264_decode_no_frame", frame_meta)
                         continue
 
                 if kv_reset_frames > 0 and frames_since_session_reset >= kv_reset_frames:
@@ -1700,6 +1814,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         frame_meta["jpeg_decode_ms"] = (time.perf_counter() - _dec_t0) * 1000.0
                     else:
                         frame = _decode_image(frame_bytes)
+                    frame_audit.observe("decoded", [frame_meta])
 
                     if face_gate_pending:
                         _reason, _center, _nf = _check_face_gate(
@@ -1863,6 +1978,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             ws_debug["frames_dropped_backpressure"] = (
                                 int(ws_debug.get("frames_dropped_backpressure", 0)) + 1
                             )
+                            frame_audit.drop("inference_backpressure", frame_meta)
                             return session._drain_async_results()
 
                         _rec_i = rec_input
@@ -1870,18 +1986,36 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             _rec_i.submit(frame, frame_meta.get("t_capture_ms"))
                             ws_debug["rec_in_written"] = _rec_i.frames_written
                             ws_debug["rec_in_dropped"] = _rec_i.frames_dropped_recording
+                        frame_audit.observe("admitted", [frame_meta])
                         return session.push_frame(frame, frame_meta=frame_meta)
                     finally:
                         app.state.inference_lock.release()
 
                 started = time.time()
+                is_reference_initialization = bool(
+                    session.ref_image is not None and not session.initialized
+                )
+                push_frame_timeout_s = max(0.1, float(args.push_frame_timeout_s))
+                if is_reference_initialization:
+                    # The first RV2V frame may need to compile a reference-image
+                    # VAE graph and capture a ref-token CUDA graph on a fresh
+                    # worker. Do not let the steady-state stall guard cancel
+                    # that healthy one-time initialization while its worker
+                    # thread continues compiling in the background.
+                    push_frame_timeout_s = max(
+                        push_frame_timeout_s,
+                        float(args.reference_init_timeout_s),
+                    )
+                ws_debug["push_frame_timeout_s"] = push_frame_timeout_s
+                ws_debug["reference_initializing"] = is_reference_initialization
                 try:
                     chunk_results = await asyncio.wait_for(
                         asyncio.to_thread(_run_frame),
-                        timeout=max(0.1, float(args.push_frame_timeout_s)),
+                        timeout=push_frame_timeout_s,
                     )
                 except asyncio.TimeoutError:
-                    msg = f"push_frame timeout after {args.push_frame_timeout_s:.1f}s"
+                    phase = " during reference initialization" if is_reference_initialization else ""
+                    msg = f"push_frame timeout after {push_frame_timeout_s:.1f}s{phase}"
                     print(f"#####[WS-GUARD] {msg}", flush=True)
                     await _send_json({"type": "error", "message": msg})
                     break
@@ -1891,10 +2025,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 if isinstance(chunk_results, tuple) and chunk_results and isinstance(chunk_results[0], str):
                     sentinel = chunk_results[0]
                     if sentinel == "__no_person__":
+                        frame_audit.drop("presence_hold", frame_meta)
                         _hold_reason = chunk_results[1] if len(chunk_results) > 1 else "no_person"
                         await _send_json({"type": "no_person", "reason": _hold_reason, "frames_in": frames_in})
                         continue
                     if sentinel == "__person_returned__":
+                        frame_audit.drop("presence_return_reset", frame_meta)
                         face_gate_pending = True
                         gate_state["count"] = 0
                         gate_state["cx"] = None
@@ -1911,6 +2047,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         await _reset_session("person_returned")
                         continue
                 if isinstance(chunk_results, str) and chunk_results == "__gate_pe__":
+                    frame_audit.drop("prompt_enhance_gate", frame_meta)
                     if pe_task is None:
                         anchor = gate_state.get("pe_anchor")
                         gate_state["pe_anchor"] = None
@@ -1954,6 +2091,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     last_activity = time.monotonic()
                     continue
                 if isinstance(chunk_results, str):
+                    frame_audit.drop(f"face_gate:{chunk_results}", frame_meta)
                     await _send_json({"type": "waiting_face", "reason": chunk_results, "frames_in": frames_in})
                     continue
                 if face_gate_pending:
@@ -2013,6 +2151,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     app.state.active_session = None
                 ws_debug["closed_at"] = time.time()
                 ws_debug["send_state"] = "closed"
+                print(
+                    "#####[FRAME-AUDIT] "
+                    + json.dumps(frame_audit.snapshot(), separators=(",", ":"), sort_keys=True),
+                    flush=True,
+                )
             finally:
                 if ticket is not None:
                     app.state.session_gate.release(ticket)
@@ -2070,12 +2213,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Downlink transport. 'auto' honors browser h264 (saves bandwidth; display-only, does not affect generated identity). 'mjpeg' forces JPEG. Default auto.")
     parser.add_argument("--prompt", type=str, default="Keep the person and scene temporally consistent while applying the requested edit.")
     parser.add_argument("--profile-timings", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--kv-reset-frames", type=int, default=1080)
+    parser.add_argument("--kv-reset-frames", type=int, default=0)
     parser.add_argument("--max-temporal-ids", type=int, default=None)
     parser.add_argument("--freeze-kv-on-static", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--static-diff-thresh", type=float, default=0.5)
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--push-frame-timeout-s", type=float, default=15.0, help="Max seconds a single frame submission may block before releasing the WS session gate.")
+    parser.add_argument("--reference-init-timeout-s", type=float, default=300.0, help="Max seconds allowed for the first frame of a reference-image session to compile its VAE/ref-token graphs. Later frames still use --push-frame-timeout-s.")
     parser.add_argument("--max-inflight-chunks", type=int, default=2, help="Drop incoming frames while this many chunks are already in the pipeline (latency governor; pins display latency to ~N chunk periods). 2 keeps glass-to-glass latency low (~1 chunk) and prevents the session-start init stall from building a frame backlog (the 'ramp-up'); higher values buffer more (smoother under hiccups) at the cost of latency and a startup ramp. 0 disables. Overridable per session via the start payload's max_inflight_chunks.")
     parser.add_argument("--session-close-timeout-s", type=float, default=5.0, help="Best-effort session cleanup timeout during WS teardown.")
     parser.add_argument("--inference-lock-timeout-s", type=float, default=5.0, help="Max seconds to wait for the process-wide inference lock.")

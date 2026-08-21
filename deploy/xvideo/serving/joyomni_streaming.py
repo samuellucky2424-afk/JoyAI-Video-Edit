@@ -19,6 +19,7 @@ from xvideo.models.models import load_dit, load_pipeline, build_vae
 from xvideo.models.pipeline import (
     PRECISION_TO_TYPE,
 )
+from xvideo.serving.frame_audit import FrameAudit
 from xvideo.serving.graph_runner import GRAPH_WINDOW_CHUNKS, StreamingGraphRunner, graph_env_enabled
 from xvideo.utils import _dynamic_resize_from_bucket, seed_everything
 
@@ -96,6 +97,12 @@ class StreamingSettings:
     store_clean_self_only: bool = True
     profile_timings: bool = False
     output_codec: str = "mjpeg"
+    reference_kv_scale: float = 1.0
+    stabilize_identity_exposure: bool = False
+    identity_exposure_max_ratio: float = 1.18
+    identity_exposure_min_gain: float = 0.68
+    vae_posterior_mode: str = "sample"
+    frame_audit: FrameAudit | None = None
 
 @dataclass
 class StreamingChunkResult:
@@ -163,6 +170,53 @@ def _load_vae_for_device(cfg: ExpConfig, device: torch.device) -> torch.nn.Modul
     vae.requires_grad_(False)
     vae.eval()
     return vae
+
+
+def _canonical_device(device: torch.device | str) -> torch.device:
+    device_obj = torch.device(device)
+    if device_obj.type == "cuda" and device_obj.index is None:
+        return torch.device("cuda", torch.cuda.current_device())
+    return device_obj
+
+
+def _clone_vae_shared_weights(src: torch.nn.Module) -> torch.nn.Module:
+    """Create a separate VAE state handle that shares the source weight tensors.
+
+    Encode, decode, and pseudo-encode need independent streaming state, but
+    colocated roles do not need separate copies of the 1.4 GiB VAE weights.
+    """
+    from xvideo.models.vae import XVAEChunkCausal
+
+    for module in src.modules():
+        if isinstance(module, torch.nn.Conv3d):
+            module.weight.data = module.weight.data.to(
+                memory_format=torch.channels_last_3d
+            )
+    with torch.device("meta"):
+        clone = XVAEChunkCausal.from_config(src.config)
+    clone.load_state_dict(src.state_dict(), assign=True)
+    clone.requires_grad_(False)
+    return clone.eval()
+
+
+def _log_cuda_memory(stage: str, device: torch.device | str) -> None:
+    """Emit compact VRAM checkpoints so startup failures identify their stage."""
+    device_obj = _canonical_device(device)
+    if device_obj.type != "cuda" or not torch.cuda.is_available():
+        return
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device_obj)
+    allocated_bytes = torch.cuda.memory_allocated(device_obj)
+    reserved_bytes = torch.cuda.memory_reserved(device_obj)
+    gib = float(2**30)
+    print(
+        f"#####[VRAM] {stage}: "
+        f"allocated={allocated_bytes / gib:.2f} GiB, "
+        f"reserved={reserved_bytes / gib:.2f} GiB, "
+        f"free={free_bytes / gib:.2f} GiB, "
+        f"total={total_bytes / gib:.2f} GiB",
+        flush=True,
+    )
+
 
 class JoyOmniRuntime:
     def __init__(
@@ -242,6 +296,7 @@ class JoyOmniRuntime:
             dit.config.use_inference_kv_cache = True
         dit.requires_grad_(False)
         dit.eval()
+        _log_cuda_memory("DiT loaded (BF16 before FP8 warmup)", device_obj)
 
         try:
             from xvideo.models.dit import warmup_attention_backend as _warmup_fa
@@ -255,18 +310,54 @@ class JoyOmniRuntime:
         pipeline = load_pipeline(cfg, dit, device_obj)
         pipeline.vae.requires_grad_(False)
         pipeline.vae.eval()
+        _log_cuda_memory(
+            "pipeline loaded (text encoder + encode VAE)",
+            device_obj,
+        )
         if vae_encode_device_obj is not None:
             pipeline.vae = pipeline.vae.to(vae_encode_device_obj)
             print(f"#####[STREAM] moved encode VAE to {vae_encode_device_obj}")
 
-        decode_vae = pipeline.vae
+        def _vae_for_role(
+            role: str,
+            target_device: torch.device,
+        ) -> torch.nn.Module:
+            target = _canonical_device(target_device)
+            for share_src in (pipeline.vae, decode_vae):
+                if (
+                    share_src is not None
+                    and _canonical_device(_module_device(share_src)) == target
+                ):
+                    print(
+                        f"#####[STREAM] {role} VAE shares weights on "
+                        f"{target_device}",
+                        flush=True,
+                    )
+                    return _clone_vae_shared_weights(share_src)
+            vae = _load_vae_for_device(cfg, target_device)
+            print(
+                f"#####[STREAM] loaded {role} VAE on {target_device}",
+                flush=True,
+            )
+            return vae
+
+        decode_vae = None
         if vae_decode_device_obj is not None:
-            decode_vae = _load_vae_for_device(cfg, vae_decode_device_obj)
-            print(f"#####[STREAM] loaded decode VAE on {vae_decode_device_obj}")
+            decode_vae = _vae_for_role("decode", vae_decode_device_obj)
+        if decode_vae is None:
+            decode_vae = pipeline.vae
+
         pseudo_encode_vae = decode_vae
         if vae_pseudo_device_obj is not None:
-            pseudo_encode_vae = _load_vae_for_device(cfg, vae_pseudo_device_obj)
-            print(f"#####[STREAM] loaded pseudo encode VAE on {vae_pseudo_device_obj}")
+            pseudo_encode_vae = _vae_for_role(
+                "pseudo encode",
+                vae_pseudo_device_obj,
+            )
+
+        _log_cuda_memory(
+            "VAE roles ready (shared weights where colocated)",
+            device_obj,
+        )
 
         if hasattr(pipeline, "set_progress_bar_config"):
             pipeline.set_progress_bar_config(disable=True)
@@ -280,6 +371,7 @@ class JoyOmniRuntime:
             _orientations.append((warmup_width, warmup_height))
         _stem_mod = pipeline.vae.stem
 
+        _log_cuda_memory("before VAE compile warmup", device_obj)
         try:
             _vc = _vae_compile_module()
             _lat_c = int(getattr(decode_vae, "latent_channels", 0) or 0)
@@ -342,6 +434,7 @@ class JoyOmniRuntime:
 
         if _env_on("JOYOMNI_VAE_COMPILE_STRICT"):
             _vae_compile_module().assert_runtime_ready()
+        _log_cuda_memory("after VAE compile warmup", device_obj)
 
         runtime = cls(
             cfg=cfg,
@@ -352,6 +445,7 @@ class JoyOmniRuntime:
             postprocess_device=postprocess_device_obj,
         )
 
+        _log_cuda_memory("before full-pipeline warmup", device_obj)
         try:
             if os.environ.get("JOYOMNI_SKIP_LOAD_WARMUP", "0").lower() in {"1", "true", "yes", "on"}:
                 print("#####[STREAM] load-time warmup skipped (JOYOMNI_SKIP_LOAD_WARMUP); "
@@ -365,6 +459,7 @@ class JoyOmniRuntime:
             print(f"#####[STREAM] full-pipeline warmup error ({_severity}): {_wexc!r}")
             if _warmup_strict:
                 raise RuntimeError("required full-pipeline warmup failed") from _wexc
+        _log_cuda_memory("after full-pipeline warmup phase", device_obj)
 
         if _env_on("JOYOMNI_LOAD_WARMUP_STRICT") and graph_env_enabled():
             ready_graphs = [runner for runner in runtime.graph_runners.values() if getattr(runner, "ready", False)]
@@ -492,10 +587,19 @@ class JoyOmniV2VStreamingSession:
         self.raw_prompt = prompt
         self.prompt = prompt
         self.settings = settings
+        if settings.vae_posterior_mode not in {"sample", "mode"}:
+            raise ValueError(
+                "vae_posterior_mode must be 'sample' or 'mode', "
+                f"got {settings.vae_posterior_mode!r}."
+            )
         self.ref_image = ref_image.convert("RGB") if ref_image is not None else None
         self.ref_image_latent: torch.Tensor | None = None
         self.device = self.pipeline.transformer.device
         self.generator = torch.Generator(device=self.device).manual_seed(settings.seed)
+        print(
+            f"#####[VAE-POSTERIOR] mode={settings.vae_posterior_mode}",
+            flush=True,
+        )
 
         self._prev_static_gray: np.ndarray | None = None
         self._static_anchor_id: int | None = None
@@ -535,6 +639,8 @@ class JoyOmniV2VStreamingSession:
         self.pending_metas: list[dict[str, Any]] = []
         self.prev_source_frame: torch.Tensor | None = None
         self.ref_image_kv_prefilled = False
+        self._identity_exposure_gain = 1.0
+        self._identity_exposure_active = False
 
         self.streaming_cond_embeds: torch.Tensor | None = None
         self.last_chunk_profile: dict[str, Any] | None = None
@@ -680,8 +786,17 @@ class JoyOmniV2VStreamingSession:
                 prompt_embeds=self.streaming_cond_embeds,
                 reference_image_latents=self.ref_image_latent,
                 transformer_dtype=self.target_dtype,
+                reference_kv_scale=self.settings.reference_kv_scale,
             )
             self.ref_image_kv_prefilled = True
+            print(
+                "#####[IDENTITY-LOCK] "
+                f"enabled={bool(self.settings.stabilize_identity_exposure)} "
+                "reference KV value scale="
+                f"{self.settings.reference_kv_scale:.2f} "
+                f"exposure_guard={bool(self.settings.stabilize_identity_exposure)}",
+                flush=True,
+            )
 
         self._maybe_prepare_graph_runner()
 
@@ -703,6 +818,12 @@ class JoyOmniV2VStreamingSession:
         )
 
         self.streaming_cond_embeds = prompt_embeds
+
+    @torch.no_grad()
+    def _posterior_latent(self, posterior: Any) -> torch.Tensor:
+        if self.settings.vae_posterior_mode == "mode":
+            return posterior.mode()
+        return posterior.sample()
 
     @torch.no_grad()
     def _encode_ref_image_latent(self) -> torch.Tensor | None:
@@ -739,7 +860,7 @@ class JoyOmniV2VStreamingSession:
             encoded = _vc.encode_via_dynamic(self.pipeline.vae, ref_img_encoded)
         if not hasattr(encoded, "latent_dist"):
             raise TypeError(f"Unsupported VAE encode output type for ref image: {type(encoded)}")
-        ref_img_latent = encoded.latent_dist.sample()
+        ref_img_latent = self._posterior_latent(encoded.latent_dist)
         if self.enable_denormalization:
             ref_img_latent = self.pipeline.normalize_latents(ref_img_latent)
 
@@ -1308,6 +1429,7 @@ class JoyOmniV2VStreamingSession:
             "age_s": now - self._debug_started_at,
             "initialized": self.initialized,
             "has_ref_image": self.ref_image is not None,
+            "reference_kv_scale": self.settings.reference_kv_scale,
             "chunk_idx_next": self.chunk_idx,
             "pending_frames": len(self.pending_frames),
             "frames_per_next_chunk": self.frames_per_next_chunk,
@@ -1370,6 +1492,12 @@ class JoyOmniV2VStreamingSession:
             frozen_anchor_id=frozen_anchor_id,
             valid_count=valid_count,
         )
+        if self.settings.frame_audit is not None:
+            self.settings.frame_audit.observe(
+                "chunked",
+                source_metas,
+                valid_count=valid_count,
+            )
         self._set_debug_state("submit", "put_encode", chunk_idx)
 
         while True:
@@ -1440,6 +1568,12 @@ class JoyOmniV2VStreamingSession:
                         chunk_idx=job.chunk_idx,
                     )
                     ready = _record_ready_event()
+                if self.settings.frame_audit is not None:
+                    self.settings.frame_audit.observe(
+                        "vae_encoded",
+                        job.source_metas,
+                        valid_count=job.valid_count,
+                    )
                 self._timer_record(job.profile, "reference_prepare_s", started)
                 self._set_debug_state("vae-encode", "put_dit_queue", job.chunk_idx)
                 self._dit_queue.put(_EncodedChunk(job=job, ref_chunk_latent=ref_chunk_latent, ready_event=ready))
@@ -1482,6 +1616,12 @@ class JoyOmniV2VStreamingSession:
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
                         )
                         _dit_ready = _record_ready_event()
+                if self.settings.frame_audit is not None:
+                    self.settings.frame_audit.observe(
+                        "inference",
+                        encoded.job.source_metas,
+                        valid_count=encoded.job.valid_count,
+                    )
                 self._set_debug_state("dit-denoise", "put_decode_queue", encoded.job.chunk_idx)
                 self._decode_queue.put(
                     _DenoisedChunk(job=encoded.job, current_chunk_latents=current_chunk_latents, ready_event=_dit_ready)
@@ -1517,6 +1657,12 @@ class JoyOmniV2VStreamingSession:
                     _consume_on_current_stream(denoised.ready_event, denoised.current_chunk_latents)
                     decoded_pixels = self._decode_chunk_pixels(
                         denoised.current_chunk_latents,
+                        profile=denoised.job.profile,
+                        chunk_idx=denoised.job.chunk_idx,
+                    )
+                    decoded_pixels = self._stabilize_identity_exposure(
+                        decoded_pixels,
+                        denoised.job.source_frames,
                         profile=denoised.job.profile,
                         chunk_idx=denoised.job.chunk_idx,
                     )
@@ -1616,6 +1762,12 @@ class JoyOmniV2VStreamingSession:
                         valid_count=decoded.job.valid_count,
                     )
                 )
+                if self.settings.frame_audit is not None:
+                    self.settings.frame_audit.observe(
+                        "output",
+                        decoded.job.source_metas,
+                        valid_count=decoded.job.valid_count,
+                    )
                 self._inc_debug_counter("postprocessed_chunks")
             except BaseException as exc:
                 self._set_debug_state("postprocess", "error", decoded.job.chunk_idx)
@@ -1666,6 +1818,7 @@ class JoyOmniV2VStreamingSession:
             ref_latent = self.pipeline._sample_vae_latents(
                 source_window,
                 enable_denormalization=self.enable_denormalization,
+                posterior_mode=self.settings.vae_posterior_mode,
             )
         if profile is not None:
             self._timer_record(profile, "vae_encode_s", started)
@@ -1745,6 +1898,92 @@ class JoyOmniV2VStreamingSession:
         return chunk_decoded.detach()
 
     @torch.no_grad()
+    def _stabilize_identity_exposure(
+        self,
+        decoded_pixels: torch.Tensor,
+        source_frames: list[Image.Image],
+        *,
+        profile: dict[str, Any] | None = None,
+        chunk_idx: int,
+    ) -> torch.Tensor:
+        """Stop clipped highlights from feeding back through the causal VAE.
+
+        RV2V streams reuse their decoded last frame as causal VAE context.  A
+        bright outlier can therefore become the next chunk's context and grow
+        into the long-horizon colour drift described in the JoyAI report.  For
+        identity-locked sessions only, compare a small luminance sample with
+        the aligned source chunk.  Correction is darkening-only, bounded, and
+        temporally smoothed; normal edits and non-clipping frames are untouched.
+
+        The correction happens before both the browser output and pseudo-VAE
+        re-encode, so a clipped frame is not fed back into the next decode.
+        """
+        if not self.settings.stabilize_identity_exposure or not source_frames:
+            return decoded_pixels
+
+        # A small sample keeps the guard cheap.  Quantiles are calculated in
+        # float32 because CUDA/BF16 quantile support varies between PyTorch
+        # versions used by the H200 image.
+        sample = (decoded_pixels[0, :, :, ::8, ::8].float() * 0.5 + 0.5).clamp_(0.0, 2.0)
+        output_luma = (
+            sample[0] * 0.2126
+            + sample[1] * 0.7152
+            + sample[2] * 0.0722
+        ).flatten()
+        output_p90 = float(torch.quantile(output_luma, 0.90).item())
+        clipped_fraction = float((output_luma >= 0.985).float().mean().item())
+
+        source_luma: list[np.ndarray] = []
+        for frame in source_frames:
+            rgb = np.asarray(frame.convert("RGB").resize((64, 36)), dtype=np.float32) / 255.0
+            source_luma.append(
+                rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
+            )
+        source_p90 = float(np.percentile(np.concatenate([x.ravel() for x in source_luma]), 90.0))
+
+        max_ratio = max(1.0, float(self.settings.identity_exposure_max_ratio))
+        allowed_p90 = min(0.92, max(0.72, source_p90 * max_ratio + 0.03))
+        desired_gain = 1.0
+        if output_p90 > allowed_p90 and clipped_fraction >= 0.015:
+            desired_gain = max(
+                float(self.settings.identity_exposure_min_gain),
+                min(1.0, allowed_p90 / max(output_p90, 1e-6)),
+            )
+
+        # Suppress a flare quickly, then recover slowly to prevent exposure
+        # pumping.  This state belongs to one streaming session/decode worker.
+        alpha = 0.70 if desired_gain < self._identity_exposure_gain else 0.08
+        self._identity_exposure_gain += alpha * (desired_gain - self._identity_exposure_gain)
+        gain = float(max(self.settings.identity_exposure_min_gain, min(1.0, self._identity_exposure_gain)))
+
+        if profile is not None:
+            profile["identity_exposure_gain"] = gain
+            profile["identity_output_luma_p90"] = output_p90
+            profile["identity_source_luma_p90"] = source_p90
+            profile["identity_clipped_fraction"] = clipped_fraction
+
+        if gain >= 0.995:
+            self._identity_exposure_active = False
+            return decoded_pixels
+
+        if not self._identity_exposure_active or chunk_idx % 20 == 0:
+            print(
+                "#####[EXPOSURE-GUARD] "
+                f"chunk={chunk_idx} gain={gain:.3f} source_p90={source_p90:.3f} "
+                f"output_p90={output_p90:.3f} clipped={clipped_fraction:.3f}",
+                flush=True,
+            )
+        self._identity_exposure_active = True
+
+        x01 = decoded_pixels.float().mul(0.5).add(0.5).mul_(gain)
+        # Soft highlight shoulder preserves gradients/skin detail that a hard
+        # clamp would turn into flat white pixels.
+        knee = 0.86
+        shoulder = knee + (1.0 - knee) * torch.tanh((x01 - knee) / (1.0 - knee))
+        x01 = torch.where(x01 > knee, shoulder, x01).clamp_(0.0, 1.0)
+        return x01.mul_(2.0).sub_(1.0).to(dtype=decoded_pixels.dtype)
+
+    @torch.no_grad()
     def _encode_next_decode_pseudo_latent(
         self,
         decoded_pixels: torch.Tensor,
@@ -1765,7 +2004,7 @@ class JoyOmniV2VStreamingSession:
             with _vc.call_guard():
                 pseudo_enc = pseudo_vae.encode(prev_pixels)
             if hasattr(pseudo_enc, "latent_dist"):
-                pseudo_latent = pseudo_enc.latent_dist.sample()
+                pseudo_latent = self._posterior_latent(pseudo_enc.latent_dist)
             else:
                 pseudo_latent = pseudo_enc
         self._set_debug_state("postprocess", "store_pseudo_latent", chunk_idx)

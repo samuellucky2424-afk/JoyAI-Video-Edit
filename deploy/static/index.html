@@ -217,6 +217,7 @@
   </div>
   <div class="cmd-foot minimal">
     <label id="peToggle" class="pe-toggle keep-min"><input id="usePe" type="checkbox" checked style="width:auto" /> <span data-i18n="pe_toggle">提示词增强</span></label>
+    <label id="identityLockToggle" class="pe-toggle keep-min"><input id="identityLock" type="checkbox" checked disabled style="width:auto" /> <span data-i18n="identity_lock">身份锁定</span></label>
     <label id="gateToggle" class="pe-toggle keep-min"><input id="dbgGateEnabled" type="checkbox" checked style="width:auto" /> <span data-i18n="gate_toggle">人物在场检测</span></label>
     <label id="profToggle" class="pe-toggle keep-min"><input id="profileTimings" type="checkbox" style="width:auto" /> <span data-i18n="prof_toggle">性能分析</span></label>
     <span class="kvreset-field keep-min">
@@ -272,12 +273,16 @@
     <div><input id="quality" type="number" value="0.2" min="0.1" max="1" step="0.01" /></div>
   </div>
   <input id="steps" type="number" value="2" min="1" max="8" />
+  <select id="vaePosteriorMode">
+    <option value="sample" selected>sample</option>
+    <option value="mode">mode</option>
+  </select>
   <label><input id="smoothPlayback" type="checkbox" checked /> <span data-i18n="smooth_playback">平滑输出播放</span></label>
   <div id="playbackDelayWrap" class="row">
     <div><input id="targetQueueDelayMs" type="number" value="100" min="0" max="5000" step="50" /></div>
     <div><input id="maxQueueDelayMs" type="number" value="200" min="0" max="8000" step="50" /></div>
   </div>
-  <input id="kvResetFrames" type="number" value="1080" min="0" step="1" />
+  <input id="kvResetFrames" type="number" value="0" min="0" step="1" />
   <label><input id="useMaxTemporalIds" type="checkbox" checked /> <span data-i18n="max_temporal">最大时序 ID</span></label>
   <div id="maxTemporalIdsWrap"><input id="maxTemporalIds" type="number" value="8" min="1" step="1" /></div>
   <label><input id="freezeKvOnStatic" type="checkbox" /> <span data-i18n="freeze_kv">静止时冻结 KV</span></label>
@@ -306,6 +311,7 @@ const I18N = {
     disp_label: "显示延迟",
     fps_label: "发/收/显",
     pe_toggle: "提示词增强",
+    identity_lock: "身份锁定",
     gate_toggle: "人物在场检测",
     prof_toggle: "性能分析",
     upload_quality: "上传清晰度",
@@ -367,6 +373,7 @@ const I18N = {
     disp_label: "Display lag",
     fps_label: "out/in/disp",
     pe_toggle: "Prompt Enhance",
+    identity_lock: "Identity Lock",
     gate_toggle: "Presence Gate",
     prof_toggle: "Profiling",
     upload_quality: "Upload quality",
@@ -617,6 +624,7 @@ function stopRecordDrain() {
   if (finalizeWatchdog) { clearTimeout(finalizeWatchdog); finalizeWatchdog = null; }
 }
 let startingRun = false;
+let awaitingFirstAcceptance = false;
 let sessionGranted = false;
 let peCache = null;
 let pendingPeCacheKey = null;
@@ -694,6 +702,8 @@ let upSkipCounter = 0;
 let upDropTotal = 0;
 let upDropAt = 0;
 let upResumeKeyframe = false;
+let captureTickTotal = 0;
+let cameraFrameTotal = 0;
 let serverChunkLastSec = null;
 let chunkProfileLast = null;
 let sessionProfileTimings = false;
@@ -1105,6 +1115,9 @@ function resetRunMetrics() {
   receivedFrames = 0;
   displayedFrames = 0;
   sendRealtimeSkips = 0;
+  captureTickTotal = 0;
+  cameraFrameTotal = 0;
+  upSeq = 0;
   tickInFlight = false;
   sentFramesWindow = 0;
   receivedFramesWindow = 0;
@@ -1184,6 +1197,12 @@ const outMetaByTs = new Map();
 let upCodecH264 = false;
 let upEncoder = null;
 const UPLINK_KEYFRAME_INTERVAL = 20;
+// Identity replacement is unusually sensitive to inter-frame smearing around
+// the eyes and mouth. Refresh the source image more often without switching
+// every session to the much heavier MJPEG uplink.
+const IDENTITY_UPLINK_KEYFRAME_INTERVAL = 4;
+const IDENTITY_UPLINK_BITRATE_MULTIPLIER = 1.5;
+let identityFidelityMode = false;
 let upSeq = 0;
 const upPendingByTs = new Map();
 
@@ -1196,7 +1215,8 @@ function effectiveUpQuality() {
 
 function upEncoderBitrate(width, height) {
   const REF_PX = 1248 * 720;
-  const REF_BITRATE = (effectiveUpQuality() || 0.4) * 4000000 * upDrainFactor;
+  const identityMultiplier = identityFidelityMode ? IDENTITY_UPLINK_BITRATE_MULTIPLIER : 1.0;
+  const REF_BITRATE = (effectiveUpQuality() || 0.4) * 4000000 * upDrainFactor * identityMultiplier;
   const REF_FPS = 16;
   return Math.round(REF_BITRATE * (width * height / REF_PX) * Math.sqrt(sendTargetFps() / REF_FPS));
 }
@@ -1271,8 +1291,19 @@ function resetUplinkEncoder() {
     try { upEncoder.close(); } catch (e) {}
   }
   upEncoder = null;
-  upSeq = 0;
   upPendingByTs.clear();
+}
+
+function uplinkFrameMeta(seq, captureSeq, tCaptureMs) {
+  return {
+    seq,
+    t_capture_ms: tCaptureMs,
+    capture_seq: captureSeq,
+    camera_frame_seq: cameraFrameTotal,
+    client_skip_total: sendRealtimeSkips,
+    client_uplink_drop_total: upDropTotal,
+    client_drain_factor: upDrainFactor,
+  };
 }
 
 function ensureUplinkEncoder(width, height) {
@@ -1291,7 +1322,7 @@ function ensureUplinkEncoder(width, height) {
       const buf = new ArrayBuffer(chunk.byteLength);
       chunk.copyTo(buf);
       try {
-        ws.send(JSON.stringify({ type: "frame_meta", seq: info.seq, t_capture_ms: info.t_capture_ms }));
+        ws.send(JSON.stringify({ type: "frame_meta", ...info }));
         ws.send(buf);
       } catch (e) {
         return;
@@ -1305,21 +1336,24 @@ function ensureUplinkEncoder(width, height) {
   upEncoder.configure(upEncoderConfig(width, height));
 }
 
-function encodeUplinkFrame(width, height) {
+function encodeUplinkFrame(width, height, captureSeq) {
   upSkipCounter += 1;
   const _mod = upDrainFactor <= 0.25 ? 3 : (upDrainFactor <= 0.5 ? 2 : 1);
   if (_mod > 1 && (upSkipCounter % _mod) !== 0) return;
   drawCaptureFrame(width, height);
   ensureUplinkEncoder(width, height);
   const seq = ++upSeq;
-  upPendingByTs.set(seq, { seq, t_capture_ms: Date.now() });
+  upPendingByTs.set(seq, uplinkFrameMeta(seq, captureSeq, Date.now()));
   let forceKey = false;
   if (upResumeKeyframe && ws && (ws.bufferedAmount || 0) < 131072) {
     forceKey = true;
     upResumeKeyframe = false;
   }
   const vf = new VideoFrame(capture, { timestamp: seq });
-  upEncoder.encode(vf, { keyFrame: forceKey || seq === 1 || seq % UPLINK_KEYFRAME_INTERVAL === 0 });
+  const keyframeInterval = identityFidelityMode
+    ? IDENTITY_UPLINK_KEYFRAME_INTERVAL
+    : UPLINK_KEYFRAME_INTERVAL;
+  upEncoder.encode(vf, { keyFrame: forceKey || seq === 1 || seq % keyframeInterval === 0 });
   vf.close();
 }
 
@@ -1401,6 +1435,7 @@ function flushOutputQueueToLatest() {
 
 function measureCameraFrame(now) {
   cameraMeasuredFrames += 1;
+  cameraFrameTotal += 1;
   const elapsed = Math.max((now - cameraMeasureStartedAt) / 1000, 0.001);
   if (elapsed >= 1) {
     cameraMeasuredFps = cameraMeasuredFrames / elapsed;
@@ -1518,6 +1553,7 @@ function frameBlob(width, height, quality) {
 async function tick() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (pePausedSend) return;
+  const captureSeq = ++captureTickTotal;
   if (tickInFlight) {
     sendRealtimeSkips += 1;
     updateMetrics();
@@ -1534,7 +1570,7 @@ async function tick() {
     const height = Number(document.getElementById("height").value);
     const quality = Number(document.getElementById("quality").value);
     if (upCodecH264) {
-      encodeUplinkFrame(width, height);
+      encodeUplinkFrame(width, height, captureSeq);
       updateMetrics();
       return;
     }
@@ -1543,7 +1579,7 @@ async function tick() {
     const seq = sentFrames + 1;
     const tCaptureMs = Date.now();
     try {
-      ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
+      ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, captureSeq, tCaptureMs) }));
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(blob);
     } catch (err) {
@@ -1576,7 +1612,7 @@ async function sendCurrentVideoFrame(mediaTimeSec) {
   const seq = sentFrames + 1;
   const tCaptureMs = Math.round(mediaTimeSec * 1000);
   try {
-    ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
+    ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, seq, tCaptureMs) }));
     if (ws.readyState !== WebSocket.OPEN) return false;
     ws.send(blob);
   } catch (err) {
@@ -1642,7 +1678,9 @@ async function beginSession() {
   const rawPrompt = document.getElementById("prompt").value;
   const peSuppressed = suppressPeThisSend;
   suppressPeThisSend = false;
-  const usePe = !peSuppressed && !refImage && document.getElementById("usePe").checked;
+  const usePe = !peSuppressed && document.getElementById("usePe").checked;
+  const identityLock = !!refImage && document.getElementById("identityLock").checked;
+  identityFidelityMode = identityLock;
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
   const cacheKey = peCacheKey(rawPrompt, refImage);
@@ -1676,11 +1714,21 @@ async function beginSession() {
     height,
     num_inference_steps: Number(document.getElementById("steps").value),
     use_pe: usePe,
+    identity_lock: identityLock,
+    // The official RV2V anchor alone can copy appearance while underweighting
+    // facial identity for difficult source/reference pairs. Use the established
+    // bounded 1.5x upper edge; the exposure guard separately
+    // prevents bright decoded frames from feeding a long-horizon flare.
+    reference_kv_scale: identityLock ? 1.5 : 1.0,
     gate_enabled: faceGateDebugEnabled(),
     seed: SERVER_DEFAULTS.seed,
-    kv_reset_frames: Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
+    // A hard KV/session reset discards the generated identity history and can
+    // cause a visible person change when the stream starts again. Keep the
+    // continuously cached RV2V reference alive for the full locked session.
+    kv_reset_frames: identityLock ? 0 : Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
     output_quality: Number(downQualityUi.value),
     fps: sendTargetFps(),
+    vae_posterior_mode: document.getElementById("vaePosteriorMode").value,
     output_codec: h264DecodeOk ? "h264" : "mjpeg",
     input_codec: upCodecH264 ? "h264" : "mjpeg"
   };
@@ -1760,8 +1808,12 @@ async function start() {
           try { camera.currentTime = 0; } catch (err) {}
         }
         startingRun = false;
+        // A reference session may spend its first frame compiling the RV2V
+        // reference graph. Keep Send disabled during that one-time work so a
+        // second click cannot tear down a healthy initializing session.
+        awaitingFirstAcceptance = Boolean(refImage);
         pePausedSend = false;
-        setSendBusy(false, t("busy_running"));
+        setSendBusy(awaitingFirstAcceptance, t("busy_running"));
         outputWaitingFace = false;
         waitHintReason = null;
 
@@ -1857,7 +1909,16 @@ async function start() {
         return;
       }
       if (msg.type === "accepted") {
+        if (awaitingFirstAcceptance) {
+          awaitingFirstAcceptance = false;
+          setSendBusy(false, t("busy_running"));
+        }
         updateMetrics();
+        return;
+      }
+      if (msg.type === "error") {
+        awaitingFirstAcceptance = false;
+        setSendBusy(false, t("busy_conn_err"));
         return;
       }
       if (msg.type === "no_person") {
@@ -1941,6 +2002,10 @@ async function start() {
       return;
     }
     if (startingRun) return;
+    if (awaitingFirstAcceptance) {
+      awaitingFirstAcceptance = false;
+      setSendBusy(false, t("busy_running"));
+    }
     const meta = pendingOutputMeta;
     pendingOutputMeta = null;
     receivedFrames += 1;
@@ -1980,9 +2045,13 @@ async function start() {
     resultEpoch += 1;
     ws = null;
     startingRun = false;
+    awaitingFirstAcceptance = false;
     sessionGranted = false;
     setSendBusy(false, t("busy_disconnected"));
-    showOutputIdle(true);
+    // Keep the last successfully decoded result visible while the background
+    // reconnect runs. Replacing it with the idle panel makes a brief RunPod or
+    // local-DNS interruption look like the identity/output disappeared.
+    showOutputIdle(!(streamingWanted && receivedFrames > 0));
     updateMetrics();
     scheduleReconnect();
   };
@@ -2021,6 +2090,7 @@ function stopActiveRun() {
     try { currentWs.close(); } catch (err) {}
   }
   startingRun = false;
+  awaitingFirstAcceptance = false;
   sessionGranted = false;
   setSendBusy(false, "");
 }
@@ -2065,7 +2135,7 @@ const PROMPT_GROUPS = [
     key: "ref_tryon",
     label: "参考图编辑", label_en: "Reference Image",
     cases: [
-      { title: "我的参考人物", title_en: "My Reference Person", desc: "用上传图片中的人物替换主角", desc_en: "Replace the subject with your uploaded person", text: "将视频中的主角替换为上传的参考图中的人物。保持参考人物的身份、面部、发型和服装，同时保留原视频的姿势、动作、镜头和背景。", text_en: "Replace the main subject in the video with the person shown in the uploaded reference image. Preserve the reference person's identity, face, hairstyle, and clothing while keeping the source pose, motion, camera, and background unchanged." },
+      { title: "我的参考人物", title_en: "My Reference Person", desc: "用上传图片中的人物替换主角", desc_en: "Replace the subject with your uploaded person", text: "使用参考人物的身份、面部外观和自然肤色，并将肤色一致地应用于脸、颈部、手臂和手等所有可见皮肤。保留源视频的姿势、面部表情、眼神、口型、嘴唇动作和身体动作。", text_en: "Use the reference person's identity, facial appearance, and natural skin tone consistently on all visible skin, including the face, neck, arms, and hands. Preserve the source pose, facial expression, eye motion, mouth shape, lip movements, and body motion." },
       { title: "NY 棒球帽", title_en: "NY Cap", desc: "戴上参考图里的黑色 NY 棒球帽", desc_en: "Black NY cap from the reference image", ref: "hat", text: "将参考图中的黑色 NY 棒球帽戴到主角头上，帽子正面朝前。", text_en: "Put the black NY baseball cap from the reference image on the subject's head, facing forward." },
       { title: "红色围巾", title_en: "Red Scarf", desc: "围上参考图里的红色流苏围巾", desc_en: "Red tasseled scarf from the reference image", ref: "scarf", text: "将参考图中的红色流苏围巾围到主角的颈部。", text_en: "Wrap the red tasseled scarf from the reference image around the subject's neck." },
       { title: "粉色T恤", title_en: "Pink Tee", desc: "换上参考图里的粉色短袖 T 恤", desc_en: "Pink short-sleeve tee from the reference image", ref: "pink_tee", text: "将主角的衣服换成参考图里的粉色短袖 T 恤。", text_en: "Replace the subject's clothing with the pink short-sleeve T-shirt from the reference image." },
@@ -2160,6 +2230,7 @@ function syncRefThumb() {
     refSlot.style.display = "";
   }
   syncPeAvailability();
+  syncIdentityLockAvailability();
 }
 
 function refImageActive() {
@@ -2169,7 +2240,7 @@ function refImageActive() {
 function syncPeAvailability() {
   const usePeEl = document.getElementById("usePe");
   const peAvailable = !(SERVER_DEFAULTS && SERVER_DEFAULTS.pe_available === false);
-  const locked = refImageActive() || !peAvailable;
+  const locked = !peAvailable;
   if (usePeEl) {
     usePeEl.disabled = locked;
     if (!peAvailable) usePeEl.checked = false;
@@ -2177,6 +2248,11 @@ function syncPeAvailability() {
   if (peToggleEl) {
     peToggleEl.setAttribute("aria-disabled", locked ? "true" : "false");
   }
+}
+
+function syncIdentityLockAvailability() {
+  const identityLockEl = document.getElementById("identityLock");
+  if (identityLockEl) identityLockEl.disabled = !refImageActive();
 }
 
 let activeChipKey = null;
@@ -2562,7 +2638,7 @@ document.getElementById("useMaxTemporalIds").addEventListener("change", () => {
   updateMaxTemporalIdsVisibility();
   updateMetrics();
 });
-for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "usePe", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "dbgGateEnabled"]) {
+for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "vaePosteriorMode", "usePe", "identityLock", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "dbgGateEnabled"]) {
   document.getElementById(id).addEventListener("input", updateMetrics);
   document.getElementById(id).addEventListener("change", updateMetrics);
 }
@@ -2715,6 +2791,10 @@ function applyServerDefaults() {
     setDownQuality(Q_TIERS[autoQTier], { live: false });
   }
   if (typeof syncUpQualityUi === "function") syncUpQualityUi();
+  const posteriorParam = new URLSearchParams(window.location.search).get("vae_posterior");
+  if (posteriorParam === "sample" || posteriorParam === "mode") {
+    document.getElementById("vaePosteriorMode").value = posteriorParam;
+  }
 }
 
 window.addEventListener("load", () => {

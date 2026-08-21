@@ -16,6 +16,7 @@ from aiohttp import (
     ClientError,
     ClientSession,
     ClientTimeout,
+    TCPConnector,
     WSCloseCode,
     WSMsgType,
     web,
@@ -302,6 +303,14 @@ async def create_session(app: web.Application) -> None:
         asyncio.get_running_loop().set_exception_handler(proxy_exception_handler)
     app["session"] = ClientSession(
         timeout=ClientTimeout(total=None, connect=60, sock_connect=60),
+        # Windows DNS briefly failed during a live test after the first
+        # minute. Reuse the resolved RunPod address instead of asking the OS
+        # resolver again for every short-lived keepalive connection.
+        connector=TCPConnector(
+            use_dns_cache=True,
+            ttl_dns_cache=600,
+            keepalive_timeout=30,
+        ),
         # Relay compressed bytes and their Content-Encoding header unchanged.
         # The browser can decode Brotli itself; the local Python proxy should
         # not require the optional Brotli package just to forward RunPod HTML.

@@ -102,6 +102,17 @@ class RunPodConnectionContractTests(unittest.TestCase):
         command = START.build_model_command(ROOT, preload=True)
         self.assertEqual(command[-1], "--preload")
 
+    def test_gpu_specific_image_rejects_wrong_cuda_capability(self):
+        with patch.dict(
+            os.environ,
+            {"JOYOMNI_EXPECTED_CUDA_CAPABILITY": "12.0"},
+            clear=True,
+        ):
+            self.assertTrue(
+                START.cuda_capability_matches((12, 0), "RTX PRO 6000 Blackwell")
+            )
+            self.assertFalse(START.cuda_capability_matches((9, 0), "H200"))
+
     def test_runpod_ping_is_internal_and_checks_public_health(self):
         text = (ROOT / "runpod" / "health_server.py").read_text()
         self.assertIn('@app.get("/ping")', text)
@@ -167,19 +178,22 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('getattr(error, "winerror", None) == 10054', text)
         self.assertIn('"_call_connection_lost" in message', text)
 
-    def test_h200_live_mode_disables_recording_and_uses_low_bandwidth_defaults(self):
+    def test_h200_live_mode_uses_controlled_720p_two_step_preset(self):
         dockerfile = (ROOT / "Dockerfile.h200").read_text()
         launcher = (ROOT / "deploy" / "run_server.sh").read_text()
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
         self.assertIn("JOYOMNI_RECORD_ENABLED=0", dockerfile)
         self.assertIn("JOYOMNI_ONLINE_GATE_ENABLED=0", dockerfile)
+        self.assertIn("JOYOMNI_WIDTH=1248", dockerfile)
+        self.assertIn("JOYOMNI_HEIGHT=720", dockerfile)
         self.assertIn("JOYOMNI_FPS=20", dockerfile)
+        self.assertIn("JOYOMNI_NUM_INFERENCE_STEPS=2", dockerfile)
         self.assertIn("JOYOMNI_VAE_COMPILE=1", dockerfile)
         self.assertIn("JOYOMNI_VAE_COMPILE_STRICT=1", dockerfile)
         self.assertIn("JOYOMNI_LOAD_WARMUP_STRICT=1", dockerfile)
         self.assertIn("JOYOMNI_FULL_WARMUP_TIMEOUT_SECONDS=300", dockerfile)
         self.assertIn("JOYOMNI_WARMUP_BOTH_ORIENTATIONS=0", dockerfile)
-        self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=0", dockerfile)
+        self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=1", dockerfile)
         self.assertIn(
             "JOYOMNI_CACHE_ROOT=/runpod-volume/joyai/cache/h200-torch291-cu128",
             dockerfile,
@@ -189,6 +203,10 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('$CACHE_ROOT/triton', launcher)
         self.assertIn('$CACHE_ROOT/nv_compute', launcher)
         self.assertIn('EXTRA_ARGS+=(--record-dir "$RECORD_DIR")', launcher)
+        self.assertIn(
+            '--num-inference-steps "${JOYOMNI_NUM_INFERENCE_STEPS:-2}"',
+            launcher,
+        )
         self.assertNotIn('  --record-dir "$RECORD_DIR" \\\n', launcher)
         self.assertNotIn('id="downloadBubble"', html)
         self.assertNotIn('id="outputStartOverlay"', html)
@@ -204,7 +222,144 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 200;", html)
         self.assertIn("const MAX_BACKEND_PENDING_FRAMES = 16;", html)
         self.assertIn("const UPLINK_KEYFRAME_INTERVAL = 20;", html)
+        self.assertIn("const IDENTITY_UPLINK_KEYFRAME_INTERVAL = 4;", html)
+        self.assertIn("const IDENTITY_UPLINK_BITRATE_MULTIPLIER = 1.5;", html)
         self.assertIn('autoQuality = true; autoQTier = 0;', html)
+
+    def test_rtx_pro_6000_uses_controlled_480p_24fps_preset(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        workflow = (
+            ROOT / ".github" / "workflows" / "build-runpod-image.yml"
+        ).read_text()
+        h200_workflow = (
+            ROOT / ".github" / "workflows" / "build-runpod-h200.yml"
+        ).read_text()
+
+        self.assertIn("TORCH_CUDA_ARCH_LIST=12.0", dockerfile)
+        self.assertIn("JOYOMNI_OPS_CUDA_ARCHS=120a", dockerfile)
+        self.assertIn("JOYOMNI_EXPECTED_CUDA_CAPABILITY=12.0", dockerfile)
+        self.assertIn("JOYOMNI_WIDTH=840", dockerfile)
+        self.assertIn("JOYOMNI_HEIGHT=480", dockerfile)
+        self.assertIn("JOYOMNI_FPS=24", dockerfile)
+        self.assertIn("JOYOMNI_NUM_INFERENCE_STEPS=2", dockerfile)
+        self.assertIn("JOYOMNI_VAE_COMPILE_STRICT=1", dockerfile)
+        self.assertIn("JOYOMNI_LOAD_WARMUP_STRICT=1", dockerfile)
+        self.assertIn("JOYOMNI_WARMUP_REFERENCE_BUCKETS=1", dockerfile)
+        self.assertIn(
+            "JOYOMNI_CACHE_ROOT=/runpod-volume/joyai/cache/"
+            "rtx-pro-6000-blackwell-torch291-cu128",
+            dockerfile,
+        )
+        self.assertIn('runpod-rtx-pro-6000-image-${{ github.ref }}', workflow)
+        self.assertIn('rtx-pro-6000-sha-${{ github.sha }}', workflow)
+        self.assertIn("push:", workflow)
+        self.assertNotIn("  push:\n", h200_workflow)
+
+    def test_reference_initialization_is_not_cancelled_by_live_frame_guard(self):
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn('--reference-init-timeout-s", type=float, default=300.0', server)
+        self.assertIn(
+            "session.ref_image is not None and not session.initialized",
+            server,
+        )
+        self.assertIn("timeout=push_frame_timeout_s", server)
+        self.assertIn("let awaitingFirstAcceptance = false;", html)
+        self.assertIn("setSendBusy(awaitingFirstAcceptance", html)
+
+    def test_reference_identity_lock_is_wired_end_to_end(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        pipeline = (ROOT / "deploy" / "xvideo" / "models" / "pipeline.py").read_text()
+        dit = (ROOT / "deploy" / "xvideo" / "models" / "dit" / "dit.py").read_text()
+
+        self.assertIn('id="identityLock"', html)
+        self.assertIn("identity_lock: identityLock", html)
+        self.assertIn("identityFidelityMode = identityLock", html)
+        self.assertIn("seq % keyframeInterval === 0", html)
+        self.assertIn("reference_kv_scale: identityLock ? 1.5 : 1.0", html)
+        self.assertIn("kv_reset_frames: identityLock ? 0", html)
+        self.assertIn('payload.get("identity_lock", False)', server)
+        self.assertIn("#####[IDENTITY-PROMPT] appended skin and expression fidelity directive", server)
+        self.assertIn("including the face, neck, arms, and hands", server)
+        self.assertIn("facial expression, eye motion, mouth shape", server)
+        self.assertIn("1.5 if identity_lock else 1.0", server)
+        self.assertIn("max(1.0, min(1.5, reference_kv_scale))", server)
+        self.assertIn("if identity_lock:\n                            kv_reset_frames = 0", server)
+        self.assertIn("reference_kv_scale=reference_kv_scale", server)
+        self.assertIn("reference_kv_scale: float = 1.0", runtime)
+        self.assertIn("reference_kv_scale=self.settings.reference_kv_scale", runtime)
+        self.assertIn("model.scale_kv_cache_values(", pipeline)
+        self.assertIn("def scale_kv_cache_values(", dit)
+        self.assertIn("stabilize_identity_exposure=identity_lock", server)
+        self.assertIn('task_type = "rv2v" if ref_image is not None else "v2v"', server)
+        self.assertIn('images=[ref_image] if ref_image is not None else None', server)
+        self.assertIn(
+            'const usePe = !peSuppressed && document.getElementById("usePe").checked;',
+            html,
+        )
+        self.assertNotIn("!peSuppressed && !refImage", html)
+        self.assertIn("const locked = !peAvailable;", html)
+        self.assertIn('"num_inference_steps": session_settings.num_inference_steps', server)
+        self.assertIn('"#####[SESSION-CONFIG] "', server)
+        self.assertNotIn("reference_kv_scale = 1.0\n                        else:", server)
+        self.assertIn("if identity_lock:\n                            # Whole-frame static detection", server)
+        self.assertIn("def _stabilize_identity_exposure(", runtime)
+        self.assertIn("#####[EXPOSURE-GUARD]", runtime)
+        self.assertIn('f"enabled={bool(self.settings.stabilize_identity_exposure)} "', runtime)
+        self.assertIn('f"{self.settings.reference_kv_scale:.2f} "', runtime)
+        self.assertIn('f"exposure_guard={bool(self.settings.stabilize_identity_exposure)}"', runtime)
+
+    def test_frame_delivery_audit_reaches_inference(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        self.assertIn("capture_seq: captureSeq", html)
+        self.assertIn("client_uplink_drop_total: upDropTotal", html)
+        self.assertIn('frame_audit.observe("wire", [frame_meta])', server)
+        self.assertIn('frame_audit.observe("decoded", [frame_meta])', server)
+        self.assertIn('frame_audit.observe("admitted", [frame_meta])', server)
+        self.assertIn('frame_audit.drop("inference_backpressure", frame_meta)', server)
+        self.assertIn('"#####[FRAME-AUDIT] "', server)
+        self.assertIn('"vae_encoded"', runtime)
+        self.assertIn('"inference"', runtime)
+        self.assertIn('"output"', runtime)
+
+    def test_vae_posterior_mode_is_selectable_per_session(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        pipeline = (ROOT / "deploy" / "xvideo" / "models" / "pipeline.py").read_text()
+
+        self.assertIn('id="vaePosteriorMode"', html)
+        self.assertIn('get("vae_posterior")', html)
+        self.assertIn('vae_posterior_mode: document.getElementById("vaePosteriorMode").value', html)
+        self.assertIn("vae_posterior_mode not in {\"sample\", \"mode\"}", server)
+        self.assertIn("vae_posterior_mode=vae_posterior_mode", server)
+        self.assertIn('"vae_posterior_mode": session_settings.vae_posterior_mode', server)
+        self.assertIn('vae_posterior_mode: str = "sample"', runtime)
+        self.assertIn("#####[VAE-POSTERIOR]", runtime)
+        self.assertIn("self._posterior_latent(encoded.latent_dist)", runtime)
+        self.assertIn("self._posterior_latent(pseudo_enc.latent_dist)", runtime)
+        self.assertIn("posterior_mode=self.settings.vae_posterior_mode", runtime)
+        self.assertIn('if posterior_mode == "mode":', pipeline)
+        self.assertIn("latents = posterior.mode()", pipeline)
+        self.assertIn("latents = posterior.sample()", pipeline)
 
     def test_health_reports_required_runtime_optimizations(self):
         server = (
@@ -264,6 +419,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("scheduleReconnect();", html)
         self.assertIn("streamingWanted = false;\n  cancelReconnect();", html)
         self.assertIn("streamingWanted = true;\n  await start();", html)
+        self.assertIn("showOutputIdle(!(streamingWanted && receivedFrames > 0));", html)
 
     def test_proxy_reports_websocket_close_codes(self):
         text = (ROOT / "runpod" / "local_proxy.py").read_text()
@@ -283,8 +439,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('label_en: "Reference Image"', html)
         self.assertIn('title_en: "My Reference Person"', html)
         self.assertIn(
-            "Replace the main subject in the video with the person shown in the "
-            "uploaded reference image.",
+            "Preserve the source pose, facial expression, eye motion, mouth shape, lip movements, and body motion.",
             html,
         )
 
@@ -311,6 +466,13 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('f"{app[\'upstream\']}/health"', text)
         self.assertIn("asyncio.create_task(keep_worker_active(request.app))", text)
         self.assertIn("keepalive_task.cancel()", text)
+
+    def test_proxy_caches_runpod_dns_for_live_session_continuity(self):
+        text = (ROOT / "runpod" / "local_proxy.py").read_text()
+        self.assertIn("TCPConnector(", text)
+        self.assertIn("use_dns_cache=True", text)
+        self.assertIn("ttl_dns_cache=600", text)
+        self.assertIn("keepalive_timeout=30", text)
 
     def test_runpod_settings_limit_one_viewer_tests_to_one_worker(self):
         text = (ROOT / "runpod" / "README.md").read_text()

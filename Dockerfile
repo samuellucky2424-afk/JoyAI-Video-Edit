@@ -36,16 +36,6 @@ COPY deploy/requirements.txt /tmp/requirements.txt
 
 RUN python3 -m pip install -r /tmp/requirements.txt
 
-# Install patched SageAttention for RTX PRO 6000 Blackwell.
-COPY deploy/sageattention-cudagraph-stream.patch /tmp/sageattention.patch
-
-RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/SageAttention \
-    && git -C /tmp/SageAttention checkout d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5 \
-    && git -C /tmp/SageAttention apply /tmp/sageattention.patch \
-    && cd /tmp/SageAttention \
-    && EXT_PARALLEL=4 NVCC_APPEND_FLAGS="--threads 8" python3 setup.py install \
-    && rm -rf /tmp/SageAttention
-
 # Build the repository's original FP8 CUDA operations.
 COPY deploy/joyomni_ops /opt/joyai/deploy/joyomni_ops
 
@@ -65,15 +55,29 @@ ENV JOYOMNI_DEVICE=cuda:0 \
     JOYOMNI_HOST=0.0.0.0 \
     JOYOMNI_PORT=8080 \
     JOYOMNI_CKPT_ROOT=/runpod-volume/joyai/checkpoints \
+    JOYOMNI_CACHE_ROOT=/runpod-volume/joyai/cache/rtx-pro-6000-blackwell-torch291-cu128-oomfix-v2 \
+    JOYOMNI_CACHE_READY_MARKER=/runpod-volume/joyai/cache/rtx-pro-6000-blackwell-torch291-cu128-oomfix-v2/ready.json \
+    JOYOMNI_EXPECTED_CUDA_CAPABILITY=12.0 \
+    JOYOMNI_PRELOAD=1 \
     JOYOMNI_WIDTH=840 \
     JOYOMNI_HEIGHT=480 \
     JOYOMNI_FPS=24 \
+    JOYOMNI_NUM_INFERENCE_STEPS=2 \
     JOYOMNI_FP8_IMG=1 \
     JOYOMNI_FP8_TXT=1 \
     JOYOMNI_CUDA_GRAPH=1 \
-    JOYOMNI_SAGE_ATTN=1 \
-    JOYOMNI_TXT_PARALLEL=1 \
-    JOYOMNI_RECORD_DIR=/tmp/joyomni-recordings
+    JOYOMNI_SAGE_ATTN=0 \
+    JOYOMNI_TXT_PARALLEL=0 \
+    JOYOMNI_FP8_FAST_ACCUM=0 \
+    JOYOMNI_VAE_COMPILE=1 \
+    JOYOMNI_VAE_COMPILE_STRICT=1 \
+    JOYOMNI_LOAD_WARMUP_STRICT=1 \
+    JOYOMNI_FULL_WARMUP_TIMEOUT_SECONDS=300 \
+    JOYOMNI_WARMUP_BOTH_ORIENTATIONS=0 \
+    JOYOMNI_WARMUP_REFERENCE_BUCKETS=1 \
+    JOYOMNI_RECORD_DIR=/tmp/joyomni-recordings \
+    JOYOMNI_RECORD_ENABLED=0 \
+    JOYOMNI_ONLINE_GATE_ENABLED=0
 
 EXPOSE 8080 8081
 

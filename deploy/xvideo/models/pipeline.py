@@ -254,6 +254,7 @@ class Pipeline(DiffusionPipeline):
         inputs: torch.Tensor,
         *,
         enable_denormalization: bool,
+        posterior_mode: str = "sample",
     ) -> torch.Tensor:
         is_causal = getattr(self.transformer.config, "causal", False)
         dit_chunk_size = getattr(self.transformer.config, "chunk_size", None)
@@ -286,18 +287,27 @@ class Pipeline(DiffusionPipeline):
                         pad = inputs[:, :, :1].expand(-1, -1, pad_needed, -1, -1)
                         window = torch.cat([pad, window], dim=2)
 
-                h = self._encode_vae_single(window, enable_denormalization=enable_denormalization)
+                h = self._encode_vae_single(
+                    window,
+                    enable_denormalization=enable_denormalization,
+                    posterior_mode=posterior_mode,
+                )
                 lat_list.append(h[:, :, -1:])
 
             return torch.cat(lat_list, dim=2)
 
-        return self._encode_vae_single(inputs, enable_denormalization=enable_denormalization)
+        return self._encode_vae_single(
+            inputs,
+            enable_denormalization=enable_denormalization,
+            posterior_mode=posterior_mode,
+        )
 
     def _encode_vae_single(
         self,
         inputs: torch.Tensor,
         *,
         enable_denormalization: bool,
+        posterior_mode: str = "sample",
     ) -> torch.Tensor:
         original_device = inputs.device
         inputs = inputs.to(self.vae.device)
@@ -306,7 +316,15 @@ class Pipeline(DiffusionPipeline):
         inputs = _vc.prep_input(inputs)
 
         with _vc.call_guard():
-            latents = self.vae.encode(inputs).latent_dist.sample()
+            posterior = self.vae.encode(inputs).latent_dist
+            if posterior_mode == "mode":
+                latents = posterior.mode()
+            elif posterior_mode == "sample":
+                latents = posterior.sample()
+            else:
+                raise ValueError(
+                    f"Unsupported VAE posterior mode {posterior_mode!r}; expected 'sample' or 'mode'."
+                )
         if enable_denormalization:
             latents = self.normalize_latents(latents)
         return latents.to(original_device)
@@ -396,6 +414,7 @@ class Pipeline(DiffusionPipeline):
         prompt_embeds: torch.Tensor,
         reference_image_latents: torch.Tensor,
         transformer_dtype: torch.dtype,
+        reference_kv_scale: float = 1.0,
     ) -> None:
         ref_img = reference_image_latents.to(device=self._execution_device, dtype=transformer_dtype)
         ref_frames = ref_img.shape[2]
@@ -412,6 +431,11 @@ class Pipeline(DiffusionPipeline):
                 self_attn_input_mode=SELF_ATTN_MODE_REF_IMAGE_CACHE,
                 skip_text_stream=True,
             )
+        model.scale_kv_cache_values(
+            self._kv_cache_memory_id("ref_image"),
+            reference_kv_scale,
+            scope="cond",
+        )
 
     def _store_clean_chunk_kv_cache(
         self,

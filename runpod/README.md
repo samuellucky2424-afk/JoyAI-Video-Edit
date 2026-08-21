@@ -51,9 +51,9 @@ while the stream is open. Ordinary HTTP follow-up requests use soft
 `X-Runpod-Worker-Id` affinity, while the WebSocket upgrade uses normal routing:
 strict affinity can be held outside the worker when RunPod considers a
 long-lived connection at capacity. Limiting the endpoint to one worker is the
-hard guarantee that normal routing cannot start a second H200.
+hard guarantee that normal routing cannot start a second billed GPU.
 
-The H200 image default checkpoint path is
+The RTX PRO 6000 Blackwell image's default checkpoint path is
 `/runpod-volume/joyai/checkpoints`. Mount the model network volume so that the
 downloaded checkpoint tree is available at that path.
 
@@ -85,26 +85,54 @@ stops. If the limit expires, stop the current worker (or temporarily set max
 workers to zero) before investigating the log. Do not start a second worker or
 rebuild the image during that inspection.
 
-The H200 image defaults to live-only operation. Recording and download
-finalization are disabled, the presence gate is off, and the browser starts at
-20 FPS with low upload/downlink quality. Its low-latency playback buffer targets
-100 ms, and the adaptive downlink can increase quality after the connection
-proves stable. Refreshing the browser replaces the previous WebSocket session
-instead of waiting behind its stale session ticket.
+The RTX PRO 6000 Blackwell image defaults to live-only operation. Recording and
+download finalization are disabled, the presence gate is off, and the browser
+starts at 840×480 at 24 FPS with low upload/downlink quality. Its low-latency
+playback buffer targets 100 ms, and the adaptive downlink can increase quality
+after the connection proves stable. Refreshing the browser replaces the previous
+WebSocket session instead of waiting behind its stale session ticket.
+
+When a reference image is attached, the browser enables the experimental
+**Identity Lock** option. It keeps the upgraded RV2V reference tokens globally
+visible and applies the bounded `1.50` KV-value multiplier. Live testing showed
+that the unmodified `1.0` reference strength could reproduce clothing while
+failing to establish the uploaded face for difficult source/reference pairs.
+The value does not change KV-cache shapes, so the CUDA-graph fast path remains
+eligible.
+Identity-locked sessions also disable the legacy periodic hard KV reset. That
+reset used to run after 1,080 input frames, discard
+the active identity history, and visibly restart the generated person.
+Identity Lock also enables a bounded, darkening-only exposure guard before the
+decoded frame is reused by the causal VAE. It suppresses clipped highlight drift
+without weakening the reference anchor or changing ordinary non-reference edits.
+Whole-frame static KV freezing is disabled for these sessions so small eye and
+mouth motions remain in the current source context. Startup logs print the
+effective identity-lock state, reference scale, and exposure-guard state for
+every reference session. This can reduce reference drift but is not a biometric
+face-swap guarantee.
+
+The Windows proxy caches the resolved RunPod address for ten minutes. This
+reduces repeated OS DNS lookups during keepalives and reconnects; a failed local
+DNS lookup was observed as `getaddrinfo failed` during a live stream. The last
+decoded result remains visible while an unexpected WebSocket reconnect runs.
 
 The proxy records the `X-Runpod-Worker-Id` returned by the initial local health
 check and uses it as a soft preference for page and asset requests. Keep
 `Max workers` at `1` during one-viewer testing so the unblocked WebSocket route
 still reaches that same worker and cannot launch a different cold worker.
 
-The H200 image enables the upstream compiled/autotuned VAE path. TorchInductor,
-Triton, and CUDA caches are stored under
-`/runpod-volume/joyai/cache/h200-torch291-cu128`, so the expensive first compile
-is reused by later workers with the same pinned image stack. The health payload
-reports `optimizations.vae_compile` and `optimizations.cuda_graph`; the strict
-H200 defaults fail startup rather than silently serving the slow eager path.
+The RTX PRO 6000 Blackwell image enables the upstream compiled/autotuned VAE
+path. TorchInductor, Triton, and CUDA caches are stored under
+`/runpod-volume/joyai/cache/rtx-pro-6000-blackwell-torch291-cu128`, separately
+from the H200 cache, so the expensive first compile is reused only by compatible
+workers with the same pinned image stack. The health payload reports
+`optimizations.vae_compile` and `optimizations.cuda_graph`; the strict defaults
+fail startup rather than silently serving the slow eager path. A compute
+capability check also rejects anything other than `sm_120` before the checkpoint
+load starts.
 For the live-only profile, startup precompiles the 840×480 landscape stream and
-does not spend GPU time warming unused portrait or reference-image shapes.
+does not spend GPU time warming the unused portrait stream. Reference-image VAE
+shapes are precompiled because Identity Lock is the primary test path.
 After compilation, the server allows up to 300 seconds for its four asynchronous
 full-pipeline warm-up chunks. This keeps strict readiness without rejecting a
 healthy first compile when later chunks finish shortly after two minutes.

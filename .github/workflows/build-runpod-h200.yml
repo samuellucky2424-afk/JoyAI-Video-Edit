@@ -2,16 +2,6 @@ name: Build RunPod H200 container image
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - "agent/**"
-    paths:
-      - .dockerignore
-      - .github/workflows/build-runpod-h200.yml
-      - Dockerfile.h200
-      - deploy/**
-      - runpod/**
 
 permissions:
   contents: read

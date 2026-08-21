@@ -58,8 +58,12 @@ def _fp8_stream_wanted(stream: str) -> bool:
 
 
 def _maybe_install_fp8_stream(block, stream: str) -> None:
-    """Quantize the attn qkv/proj + mlp up/down Linears of one stream ("img" or "txt")
-    to FP8. Idempotent per (block, stream); the original bf16 Linears are left in place."""
+    """Quantize one DiT stream to FP8 and release its superseded BF16 weights.
+
+    Idempotent per (block, stream). The FP8 twins fully replace the original
+    Linear weights in forward, so retaining both copies only wastes about
+    31 GiB across the complete image and text streams.
+    """
     if not _fp8_stream_wanted(stream):
         return
     installed_flag = f"_fp8_{stream}_installed"
@@ -90,6 +94,17 @@ def _maybe_install_fp8_stream(block, stream: str) -> None:
     _approx = getattr(gelu_mod, "approximate", "tanh") if gelu_mod is not None else "tanh"
     setattr(block, f"_{stream}_mlp_act",
             lambda x, _a=_approx: torch.nn.functional.gelu(x, approximate=_a))
+
+    # Bias tensors remain shared with the FP8 twins. Only the superseded BF16
+    # weights are released; keeping them doubles the DiT weight residency and
+    # can exhaust a 96 GiB RTX PRO 6000 during compiled warmup.
+    for lin in (
+        getattr(block, f"{stream}_attn_qkv"),
+        getattr(block, f"{stream}_attn_proj"),
+        up_lin,
+        down_lin,
+    ):
+        lin.weight.data = lin.weight.data.new_empty(0)
     setattr(block, installed_flag, True)
 
 
@@ -796,6 +811,38 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 del scope_store[cid]
             if evict_ids:
                 self._kv_cache_generation += 1
+
+    def scale_kv_cache_values(
+        self,
+        chunk_id: int,
+        scale: float,
+        *,
+        scope: str = "cond",
+    ) -> None:
+        """Strengthen one cached conditioning chunk without changing cache shape.
+
+        This is used by the optional RV2V identity-lock mode.  Scaling only the
+        cached values preserves attention logits and CUDA-graph tensor shapes,
+        while increasing the reference chunk's contribution relative to the
+        generated-history chunks.
+        """
+        self._ensure_kv_cache_state()
+        scale = float(scale)
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("KV cache value scale must be a finite positive number")
+        if scale == 1.0:
+            return
+        chunk_store = self._inference_kv_cache.get(scope, {}).get(chunk_id)
+        if not chunk_store:
+            raise RuntimeError(
+                f"cannot scale missing KV cache chunk {chunk_id!r} in scope {scope!r}"
+            )
+        for entry in chunk_store.values():
+            entry["value"].mul_(scale)
+        self._kv_cache_generation += 1
+        self._kv_assembly_version = None
+        self._kv_assembly_cache = {}
+        self._kv_assembly_freqs = None
 
     def get_rotary_pos_embed_from_ids(
         self,
