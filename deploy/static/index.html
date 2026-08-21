@@ -727,6 +727,7 @@ let mouthTrackerLatest = null;
 let mouthTrackerProcessedTotal = 0;
 let mouthTrackerDropTotal = 0;
 let mouthTrackerErrorTotal = 0;
+let mouthTrackerLastError = null;
 let mouthTrackerEpoch = 0;
 
 function sendMouthAudit(result) {
@@ -762,6 +763,7 @@ function ensureMouthTracker() {
     if (result.type === "ready") {
       mouthTrackerReady = true;
       mouthTrackerBusy = false;
+      mouthTrackerLastError = null;
       return;
     }
     if (result.type === "result") {
@@ -778,16 +780,23 @@ function ensureMouthTracker() {
       mouthTrackerDropTotal += 1;
       return;
     }
-    if (result.type === "delegate_fallback") return;
+    if (result.type === "delegate_fallback") {
+      console.warn("MediaPipe mouth tracker GPU fallback:", result.error || "unknown error");
+      return;
+    }
     if (result.type === "detect_error" || result.type === "error") {
       mouthTrackerBusy = false;
       mouthTrackerErrorTotal += 1;
+      mouthTrackerLastError = result.error || result.type;
+      console.error("MediaPipe mouth tracker error:", mouthTrackerLastError);
     }
   };
-  mouthTrackerWorker.onerror = () => {
+  mouthTrackerWorker.onerror = (event) => {
     mouthTrackerBusy = false;
     mouthTrackerReady = false;
     mouthTrackerErrorTotal += 1;
+    mouthTrackerLastError = event.message || "Worker failed to load";
+    console.error("MediaPipe mouth worker failed:", mouthTrackerLastError);
   };
   mouthTrackerWorker.postMessage({
     type: "init",
