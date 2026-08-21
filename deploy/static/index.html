@@ -289,6 +289,7 @@
   <input id="staticDiffThresh" type="number" value="2.0" min="0" step="0.5" />
 </div>
 <canvas id="capture" style="display:none"></canvas>
+<canvas id="mouthCapture" style="display:none"></canvas>
 <div id="refLightbox" class="ref-lightbox"><img id="refLightboxImg" alt="reference enlarged" /></div>
 <script>
 const SERVER_DEFAULTS = __SERVER_DEFAULTS__;
@@ -462,6 +463,7 @@ function setLang(lang) {
 let REF_IMAGES = {};
 const camera = document.getElementById("camera");
 const capture = document.getElementById("capture");
+const mouthCapture = document.getElementById("mouthCapture");
 const outputImg = document.getElementById("outputImg");
 const outputCanvas = document.getElementById("outputCanvas");
 const outputCanvasCtx = outputCanvas.getContext("2d");
@@ -709,6 +711,155 @@ let chunkProfileLast = null;
 let sessionProfileTimings = false;
 let lastWsSendMs = null;
 let lastServerResidenceMs = null;
+
+const MOUTH_TRACKER_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const MOUTH_TRACKER_WIDTH = 384;
+const MOUTH_TRACKER_INTERVAL_MS = 1000 / 15;
+const MOUTH_TRACKER_MAX_RESULT_AGE_MS = 350;
+let mouthTrackerWorker = null;
+let mouthTrackerReady = false;
+let mouthTrackerBusy = false;
+let mouthTrackerLastSubmitMs = 0;
+let mouthTrackerLatest = null;
+let mouthTrackerProcessedTotal = 0;
+let mouthTrackerDropTotal = 0;
+let mouthTrackerErrorTotal = 0;
+let mouthTrackerEpoch = 0;
+
+function sendMouthAudit(result) {
+  if (!(ws && ws.readyState === WebSocket.OPEN && sessionGranted)) return;
+  try {
+    ws.send(JSON.stringify({
+      type: "mouth_audit",
+      camera_frame_seq: result.cameraFrameSeq,
+      t_capture_ms: result.captureTimeMs,
+      face_present: result.facePresent,
+      delegate: result.delegate,
+      inference_ms: result.inferenceMs,
+      roi: result.roi || null,
+      geometry: result.geometry || null,
+      blendshapes: result.blendshapes || null,
+      significant: Boolean(result.significant),
+      processed_total: mouthTrackerProcessedTotal,
+      drop_total: mouthTrackerDropTotal,
+    }));
+  } catch (error) {}
+}
+
+function ensureMouthTracker() {
+  if (mouthTrackerWorker || !window.Worker || !window.createImageBitmap) return;
+  try {
+    mouthTrackerWorker = new Worker("/static/mediapipe-mouth-worker.js", { type: "module" });
+  } catch (error) {
+    mouthTrackerErrorTotal += 1;
+    return;
+  }
+  mouthTrackerWorker.onmessage = (event) => {
+    const result = event.data || {};
+    if (result.type === "ready") {
+      mouthTrackerReady = true;
+      mouthTrackerBusy = false;
+      return;
+    }
+    if (result.type === "result") {
+      mouthTrackerBusy = false;
+      if (result.epoch !== mouthTrackerEpoch) return;
+      mouthTrackerProcessedTotal += 1;
+      mouthTrackerLatest = result;
+      sendMouthAudit(result);
+      return;
+    }
+    if (result.type === "dropped") {
+      mouthTrackerBusy = false;
+      if (result.epoch !== mouthTrackerEpoch) return;
+      mouthTrackerDropTotal += 1;
+      return;
+    }
+    if (result.type === "delegate_fallback") return;
+    if (result.type === "detect_error" || result.type === "error") {
+      mouthTrackerBusy = false;
+      mouthTrackerErrorTotal += 1;
+    }
+  };
+  mouthTrackerWorker.onerror = () => {
+    mouthTrackerBusy = false;
+    mouthTrackerReady = false;
+    mouthTrackerErrorTotal += 1;
+  };
+  mouthTrackerWorker.postMessage({
+    type: "init",
+    modelUrl: MOUTH_TRACKER_MODEL_URL,
+    delegate: "GPU",
+  });
+}
+
+async function observeMouthFrame(now) {
+  ensureMouthTracker();
+  if (!mouthTrackerWorker || !mouthTrackerReady || mouthTrackerBusy) {
+    if (mouthTrackerBusy) mouthTrackerDropTotal += 1;
+    return;
+  }
+  if (now - mouthTrackerLastSubmitMs < MOUTH_TRACKER_INTERVAL_MS) return;
+  if (!camera || camera.readyState < 2 || !camera.videoWidth || !camera.videoHeight) return;
+  mouthTrackerLastSubmitMs = now;
+  mouthTrackerBusy = true;
+  const configuredWidth = Math.max(1, Number(document.getElementById("width").value) || 840);
+  const configuredHeight = Math.max(1, Number(document.getElementById("height").value) || 480);
+  const trackerHeight = Math.max(1, Math.round(MOUTH_TRACKER_WIDTH * configuredHeight / configuredWidth));
+  try {
+    drawCameraFrameToCanvas(mouthCapture, MOUTH_TRACKER_WIDTH, trackerHeight);
+    const bitmap = await createImageBitmap(mouthCapture);
+    mouthTrackerWorker.postMessage({
+      type: "frame",
+      bitmap,
+      timestampMs: Math.round(now),
+      captureTimeMs: Date.now(),
+      cameraFrameSeq: cameraFrameTotal,
+      epoch: mouthTrackerEpoch,
+    }, [bitmap]);
+  } catch (error) {
+    mouthTrackerBusy = false;
+    mouthTrackerErrorTotal += 1;
+  }
+}
+
+function mouthTrackerFrameMeta(nowMs) {
+  const result = mouthTrackerLatest;
+  const age = result && result.captureTimeMs ? Math.max(0, nowMs - result.captureTimeMs) : null;
+  const available = Boolean(result && result.facePresent && age !== null && age <= MOUTH_TRACKER_MAX_RESULT_AGE_MS);
+  return {
+    mouth_landmark_available: available,
+    mouth_landmark_seq: available ? result.cameraFrameSeq : null,
+    mouth_landmark_age_ms: age,
+    mouth_roi: available ? (result.roi || null) : null,
+    mouth_geometry: available ? (result.geometry || null) : null,
+    mouth_blendshapes: available ? (result.blendshapes || null) : null,
+    mouth_tracker_processed_total: mouthTrackerProcessedTotal,
+    mouth_tracker_drop_total: mouthTrackerDropTotal,
+  };
+}
+
+function resetMouthTracker() {
+  mouthTrackerEpoch += 1;
+  mouthTrackerLatest = null;
+  mouthTrackerLastSubmitMs = 0;
+  mouthTrackerProcessedTotal = 0;
+  mouthTrackerDropTotal = 0;
+  mouthTrackerErrorTotal = 0;
+  if (mouthTrackerWorker) {
+    try { mouthTrackerWorker.postMessage({ type: "reset" }); } catch (error) {}
+  }
+}
+
+function closeMouthTracker() {
+  if (!mouthTrackerWorker) return;
+  try { mouthTrackerWorker.postMessage({ type: "close" }); } catch (error) {}
+  try { mouthTrackerWorker.terminate(); } catch (error) {}
+  mouthTrackerWorker = null;
+  mouthTrackerReady = false;
+  mouthTrackerBusy = false;
+}
 
 
 function fmt(value, suffix = "") {
@@ -1117,6 +1268,7 @@ function resetRunMetrics() {
   sendRealtimeSkips = 0;
   captureTickTotal = 0;
   cameraFrameTotal = 0;
+  resetMouthTracker();
   upSeq = 0;
   tickInFlight = false;
   sentFramesWindow = 0;
@@ -1303,6 +1455,7 @@ function uplinkFrameMeta(seq, captureSeq, tCaptureMs) {
     client_skip_total: sendRealtimeSkips,
     client_uplink_drop_total: upDropTotal,
     client_drain_factor: upDrainFactor,
+    ...mouthTrackerFrameMeta(Date.now()),
   };
 }
 
@@ -1436,6 +1589,7 @@ function flushOutputQueueToLatest() {
 function measureCameraFrame(now) {
   cameraMeasuredFrames += 1;
   cameraFrameTotal += 1;
+  void observeMouthFrame(now);
   const elapsed = Math.max((now - cameraMeasureStartedAt) / 1000, 0.001);
   if (elapsed >= 1) {
     cameraMeasuredFps = cameraMeasuredFrames / elapsed;
@@ -1515,10 +1669,10 @@ async function ensureCamera() {
   }
 }
 
-function drawCaptureFrame(width, height) {
-  capture.width = width;
-  capture.height = height;
-  const ctx = capture.getContext("2d");
+function drawCameraFrameToCanvas(targetCanvas, width, height) {
+  targetCanvas.width = width;
+  targetCanvas.height = height;
+  const ctx = targetCanvas.getContext("2d");
   const selfieMirror = !usingVideoFile;
   ctx.save();
   if (selfieMirror) {
@@ -1543,6 +1697,10 @@ function drawCaptureFrame(width, height) {
   }
   ctx.drawImage(camera, sx, sy, cropW, cropH, 0, 0, width, height);
   ctx.restore();
+}
+
+function drawCaptureFrame(width, height) {
+  drawCameraFrameToCanvas(capture, width, height);
 }
 
 function frameBlob(width, height, quality) {
@@ -2818,7 +2976,10 @@ window.addEventListener("load", () => {
     showCameraOverlay(true);
   });
 });
-window.addEventListener("pagehide", () => stopActiveRun());
+window.addEventListener("pagehide", () => {
+  closeMouthTracker();
+  stopActiveRun();
+});
 </script>
 </body>
 </html>

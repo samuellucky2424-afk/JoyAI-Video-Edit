@@ -114,6 +114,9 @@ def _ref_images_cached() -> dict[str, str]:
 
 
 _INDEX_HTML_PATH = Path(__file__).resolve().parents[2] / "static" / "index.html"
+_MEDIAPIPE_MOUTH_WORKER_PATH = (
+    Path(__file__).resolve().parents[2] / "static" / "mediapipe-mouth-worker.js"
+)
 
 def _load_index_html() -> str:
     return _INDEX_HTML_PATH.read_text(encoding="utf-8")
@@ -670,6 +673,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         }
         html = _load_index_html().replace("__SERVER_DEFAULTS__", json.dumps(server_defaults))
         return HTMLResponse(html)
+
+    @app.get("/static/mediapipe-mouth-worker.js")
+    def mediapipe_mouth_worker() -> FileResponse:
+        return FileResponse(
+            str(_MEDIAPIPE_MOUTH_WORKER_PATH),
+            media_type="text/javascript",
+        )
 
     @app.get("/ref-images")
     def ref_images() -> JSONResponse:
@@ -1674,6 +1684,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             else "No downloadable result yet. Send an edit first.",
                         })
                         continue
+                    elif msg_type == "mouth_audit":
+                        ws_debug["last_message_type"] = "mouth_audit"
+                        frame_audit.observe_mouth(payload)
                     elif msg_type == "frame_meta":
                         ws_debug["last_message_type"] = "frame_meta"
                         next_frame_meta = {
@@ -1684,6 +1697,18 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "client_skip_total": payload.get("client_skip_total"),
                             "client_uplink_drop_total": payload.get("client_uplink_drop_total"),
                             "client_drain_factor": payload.get("client_drain_factor"),
+                            "mouth_landmark_seq": payload.get("mouth_landmark_seq"),
+                            "mouth_landmark_age_ms": payload.get("mouth_landmark_age_ms"),
+                            "mouth_landmark_available": payload.get("mouth_landmark_available"),
+                            "mouth_roi": payload.get("mouth_roi"),
+                            "mouth_geometry": payload.get("mouth_geometry"),
+                            "mouth_blendshapes": payload.get("mouth_blendshapes"),
+                            "mouth_tracker_processed_total": payload.get(
+                                "mouth_tracker_processed_total"
+                            ),
+                            "mouth_tracker_drop_total": payload.get(
+                                "mouth_tracker_drop_total"
+                            ),
                         }
                     elif msg_type == "ack":
                         _recv = payload.get("recv")
@@ -2223,25 +2248,3 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-inflight-chunks", type=int, default=2, help="Drop incoming frames while this many chunks are already in the pipeline (latency governor; pins display latency to ~N chunk periods). 2 keeps glass-to-glass latency low (~1 chunk) and prevents the session-start init stall from building a frame backlog (the 'ramp-up'); higher values buffer more (smoother under hiccups) at the cost of latency and a startup ramp. 0 disables. Overridable per session via the start payload's max_inflight_chunks.")
     parser.add_argument("--session-close-timeout-s", type=float, default=5.0, help="Best-effort session cleanup timeout during WS teardown.")
     parser.add_argument("--inference-lock-timeout-s", type=float, default=5.0, help="Max seconds to wait for the process-wide inference lock.")
-
-    parser.add_argument("--record-dir", type=str, default=None, help="Directory to record input/output mp4s into (per-session subfolder). Off if unset.")
-    parser.add_argument("--record-codec", type=str, default="libx264", help="Recording video codec (PyAV/ffmpeg name).")
-    parser.add_argument("--record-bitrate", type=int, default=8_000_000, help="Recording target bitrate in bits/sec.")
-    parser.add_argument("--record-segment-seconds", type=int, default=300, help="Roll to a new mp4 segment every N seconds of recorded frames.")
-    return parser
-
-def parse_args() -> argparse.Namespace:
-    return build_parser().parse_args()
-
-def main() -> None:
-    import logging
-    logging.getLogger("torch.utils._sympy.interp").setLevel(logging.ERROR)
-    from xvideo.inductor_autotune_fix import install as _install_autotune_fix
-    _install_autotune_fix()
-    args = parse_args()
-    app = create_app(args)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info", ws_max_size=32 * 1024 * 1024, ws_per_message_deflate=False, loop="uvloop")
-
-
-if __name__ == "__main__":
-    main()

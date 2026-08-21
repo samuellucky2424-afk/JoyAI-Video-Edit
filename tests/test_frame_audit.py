@@ -95,6 +95,61 @@ class FrameAuditTests(unittest.TestCase):
             [[21, 21]],
         )
 
+    def test_reports_significant_mouth_events_lost_before_inference(self):
+        audit = FRAME_AUDIT.FrameAudit()
+        audit.observe_mouth(
+            {
+                "camera_frame_seq": 10,
+                "face_present": True,
+                "significant": True,
+                "geometry": {"motion": 0.12},
+                "processed_total": 1,
+            }
+        )
+        audit.observe_mouth(
+            {
+                "camera_frame_seq": 11,
+                "face_present": True,
+                "significant": False,
+                "geometry": {"motion": 0.01},
+                "processed_total": 2,
+            }
+        )
+        audit.observe_mouth(
+            {
+                "camera_frame_seq": 13,
+                "face_present": True,
+                "significant": True,
+                "geometry": {"motion": 0.18},
+                "processed_total": 3,
+            }
+        )
+
+        wire = {
+            "seq": 1,
+            "camera_frame_seq": 10,
+            "mouth_landmark_seq": 10,
+            "mouth_landmark_available": True,
+        }
+        audit.observe("wire", [wire])
+        audit.observe("inference", [wire])
+
+        report = audit.snapshot()
+        self.assertEqual(report["mouth_audit"]["recent_landmark_samples"], 3)
+        self.assertEqual(report["mouth_audit"]["recent_significant_events"], 2)
+        self.assertEqual(
+            report["mouth_audit"]["recent_events_not_on_wire_ranges"], [[13, 13]]
+        )
+        self.assertEqual(
+            report["mouth_audit"]["recent_events_not_in_inference_ranges"],
+            [[13, 13]],
+        )
+        self.assertEqual(
+            report["mouth_audit"]["recent_inference_not_in_output_ranges"],
+            [[10, 10]],
+        )
+        self.assertEqual(report["latest_client"]["mouth_processed_total"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

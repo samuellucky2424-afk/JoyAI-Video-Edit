@@ -48,6 +48,28 @@ class FrameAudit:
         "client_skip_total",
         "client_uplink_drop_total",
         "client_drain_factor",
+        "mouth_landmark_seq",
+        "mouth_landmark_age_ms",
+        "mouth_landmark_available",
+        "mouth_roi",
+        "mouth_geometry",
+        "mouth_blendshapes",
+        "mouth_tracker_processed_total",
+        "mouth_tracker_drop_total",
+    )
+
+    MOUTH_FIELDS = (
+        "camera_frame_seq",
+        "t_capture_ms",
+        "face_present",
+        "delegate",
+        "inference_ms",
+        "roi",
+        "geometry",
+        "blendshapes",
+        "significant",
+        "processed_total",
+        "drop_total",
     )
 
     def __init__(self, recent_limit: int = 32, sequence_window: int = 512) -> None:
@@ -107,10 +129,39 @@ class FrameAudit:
                     "browser_capture",
                     (_int_or_none(meta.get("capture_seq")) for meta in selected),
                 )
+                self._observe_sequences(
+                    "camera_wire",
+                    (_int_or_none(meta.get("camera_frame_seq")) for meta in selected),
+                )
+                self._observe_sequences(
+                    "mouth_attached_wire",
+                    (_int_or_none(meta.get("mouth_landmark_seq")) for meta in selected),
+                )
                 for meta in selected:
                     for field in self.CLIENT_FIELDS:
                         if meta.get(field) is not None:
                             self._latest_client[field] = meta[field]
+            elif stage == "inference":
+                self._observe_sequences(
+                    "camera_inference",
+                    (_int_or_none(meta.get("camera_frame_seq")) for meta in selected),
+                )
+            elif stage == "output":
+                self._observe_sequences(
+                    "camera_output",
+                    (_int_or_none(meta.get("camera_frame_seq")) for meta in selected),
+                )
+
+    def observe_mouth(self, meta: dict[str, Any]) -> None:
+        """Record browser MediaPipe telemetry without retaining image pixels."""
+        sequence = _int_or_none(meta.get("camera_frame_seq"))
+        with self._lock:
+            self._observe_sequences("mouth_landmark", [sequence])
+            if bool(meta.get("significant")):
+                self._observe_sequences("mouth_event", [sequence])
+            for field in self.MOUTH_FIELDS:
+                if meta.get(field) is not None:
+                    self._latest_client[f"mouth_{field}"] = meta[field]
 
     def drop(self, reason: str, meta: dict[str, Any] | None = None) -> None:
         reason = str(reason or "unknown")
@@ -169,6 +220,15 @@ class FrameAudit:
         unexpected_inference_count, unexpected_inference_ranges = self._missing_ranges(
             recent_sequences, "inference", "wire"
         )
+        mouth_event_wire_count, mouth_event_wire_ranges = self._missing_ranges(
+            recent_sequences, "mouth_event", "camera_wire"
+        )
+        mouth_event_inference_count, mouth_event_inference_ranges = self._missing_ranges(
+            recent_sequences, "mouth_event", "camera_inference"
+        )
+        mouth_inference_output_count, mouth_inference_output_ranges = self._missing_ranges(
+            recent_sequences, "camera_inference", "camera_output"
+        )
         recent_wire = set(recent_sequences.get("wire", ()))
         truncated_stages = sorted(
             name
@@ -204,5 +264,15 @@ class FrameAudit:
                 "recent_inference_not_in_output_ranges": inference_missing_ranges,
                 "recent_inference_not_in_wire_count": unexpected_inference_count,
                 "recent_inference_not_in_wire_ranges": unexpected_inference_ranges,
+            },
+            "mouth_audit": {
+                "recent_landmark_samples": self._stage_count(stages, "mouth_landmark"),
+                "recent_significant_events": self._stage_count(stages, "mouth_event"),
+                "recent_events_not_on_wire_count": mouth_event_wire_count,
+                "recent_events_not_on_wire_ranges": mouth_event_wire_ranges,
+                "recent_events_not_in_inference_count": mouth_event_inference_count,
+                "recent_events_not_in_inference_ranges": mouth_event_inference_ranges,
+                "recent_inference_not_in_output_count": mouth_inference_output_count,
+                "recent_inference_not_in_output_ranges": mouth_inference_output_ranges,
             },
         }
