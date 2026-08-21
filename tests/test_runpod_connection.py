@@ -480,6 +480,14 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("| Idle timeout | `60` seconds |", text)
         self.assertIn("soft", text)
 
+    def test_significant_mouth_events_only_bypass_client_drain_skips(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        self.assertIn("function freshSignificantMouthEvent", html)
+        self.assertIn("const drainWouldSkip =", html)
+        self.assertIn("if (drainWouldSkip && !mouthEvent) return;", html)
+        self.assertIn("frameMeta.mouth_event_preserved = true;", html)
+        self.assertIn("backendPendingFrames() >= MAX_BACKEND_PENDING_FRAMES", html)
+
 
 if __name__ == "__main__":
     unittest.main()
