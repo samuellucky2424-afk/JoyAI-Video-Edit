@@ -292,7 +292,9 @@
 <canvas id="mouthCapture" style="display:none"></canvas>
 <div id="refLightbox" class="ref-lightbox"><img id="refLightboxImg" alt="reference enlarged" /></div>
 <script>
-const SERVER_DEFAULTS = __SERVER_DEFAULTS__;
+const SERVER_DEFAULTS = (typeof __SERVER_DEFAULTS__ === "undefined")
+  ? {}
+  : __SERVER_DEFAULTS__;
 
 const I18N = {
   zh: {
