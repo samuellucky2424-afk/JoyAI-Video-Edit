@@ -719,6 +719,7 @@ const MOUTH_TRACKER_MODEL_URL =
 const MOUTH_TRACKER_WIDTH = 384;
 const MOUTH_TRACKER_INTERVAL_MS = 1000 / 15;
 const MOUTH_TRACKER_MAX_RESULT_AGE_MS = 350;
+const MOUTH_EVENT_MIN_PRESERVE_INTERVAL_MS = 100;
 let mouthTrackerWorker = null;
 let mouthTrackerReady = false;
 let mouthTrackerBusy = false;
@@ -729,6 +730,9 @@ let mouthTrackerDropTotal = 0;
 let mouthTrackerErrorTotal = 0;
 let mouthTrackerLastError = null;
 let mouthTrackerEpoch = 0;
+let mouthEventPreservedTotal = 0;
+let mouthEventLastPreservedSeq = -1;
+let mouthEventLastPreservedAtMs = 0;
 
 function sendMouthAudit(result) {
   if (!(ws && ws.readyState === WebSocket.OPEN && sessionGranted)) return;
@@ -846,9 +850,30 @@ function mouthTrackerFrameMeta(nowMs) {
     mouth_roi: available ? (result.roi || null) : null,
     mouth_geometry: available ? (result.geometry || null) : null,
     mouth_blendshapes: available ? (result.blendshapes || null) : null,
+    mouth_event_significant: available ? Boolean(result.significant) : false,
+    mouth_event_camera_frame_seq: available && result.significant ? result.cameraFrameSeq : null,
+    mouth_event_preserved_total: mouthEventPreservedTotal,
     mouth_tracker_processed_total: mouthTrackerProcessedTotal,
     mouth_tracker_drop_total: mouthTrackerDropTotal,
   };
+}
+
+function freshSignificantMouthEvent(nowMs = Date.now()) {
+  const result = mouthTrackerLatest;
+  if (!result || !result.facePresent || !result.significant) return null;
+  const capturedAt = Number(result.captureTimeMs) || 0;
+  const cameraFrameSeq = Number(result.cameraFrameSeq);
+  if (!capturedAt || !Number.isFinite(cameraFrameSeq)) return null;
+  if (nowMs - capturedAt > MOUTH_TRACKER_MAX_RESULT_AGE_MS) return null;
+  if (cameraFrameSeq <= mouthEventLastPreservedSeq) return null;
+  if (nowMs - mouthEventLastPreservedAtMs < MOUTH_EVENT_MIN_PRESERVE_INTERVAL_MS) return null;
+  return result;
+}
+
+function markMouthEventPreserved(result, nowMs = Date.now()) {
+  mouthEventLastPreservedSeq = Number(result.cameraFrameSeq);
+  mouthEventLastPreservedAtMs = nowMs;
+  mouthEventPreservedTotal += 1;
 }
 
 function resetMouthTracker() {
@@ -858,6 +883,9 @@ function resetMouthTracker() {
   mouthTrackerProcessedTotal = 0;
   mouthTrackerDropTotal = 0;
   mouthTrackerErrorTotal = 0;
+  mouthEventPreservedTotal = 0;
+  mouthEventLastPreservedSeq = -1;
+  mouthEventLastPreservedAtMs = 0;
   if (mouthTrackerWorker) {
     try { mouthTrackerWorker.postMessage({ type: "reset" }); } catch (error) {}
   }
@@ -1503,11 +1531,19 @@ function ensureUplinkEncoder(width, height) {
 function encodeUplinkFrame(width, height, captureSeq) {
   upSkipCounter += 1;
   const _mod = upDrainFactor <= 0.25 ? 3 : (upDrainFactor <= 0.5 ? 2 : 1);
-  if (_mod > 1 && (upSkipCounter % _mod) !== 0) return;
+  const drainWouldSkip = _mod > 1 && (upSkipCounter % _mod) !== 0;
+  const mouthEvent = drainWouldSkip ? freshSignificantMouthEvent() : null;
+  if (drainWouldSkip && !mouthEvent) return;
+  if (mouthEvent) markMouthEventPreserved(mouthEvent);
   drawCaptureFrame(width, height);
   ensureUplinkEncoder(width, height);
   const seq = ++upSeq;
-  upPendingByTs.set(seq, uplinkFrameMeta(seq, captureSeq, Date.now()));
+  const frameMeta = uplinkFrameMeta(seq, captureSeq, Date.now());
+  if (mouthEvent) {
+    frameMeta.mouth_event_preserved = true;
+    frameMeta.mouth_event_camera_frame_seq = mouthEvent.cameraFrameSeq;
+  }
+  upPendingByTs.set(seq, frameMeta);
   let forceKey = false;
   if (upResumeKeyframe && ws && (ws.bufferedAmount || 0) < 131072) {
     forceKey = true;
