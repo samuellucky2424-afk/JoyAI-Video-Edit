@@ -68,7 +68,12 @@ def load_dit(cfg, device: torch.device) -> torch.nn.Module:
     state_dict = None
     if cfg.dit_ckpt is not None:
         logger.info(f"Loading DiT checkpoint: {cfg.dit_ckpt}")
-        state_dict = torch.load(cfg.dit_ckpt, map_location="cpu", weights_only=True)
+        state_dict = torch.load(
+            cfg.dit_ckpt,
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
+        )
         if "model" in state_dict:
             state_dict = state_dict["model"]
 

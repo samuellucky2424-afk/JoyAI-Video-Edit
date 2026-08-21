@@ -58,8 +58,12 @@ def _fp8_stream_wanted(stream: str) -> bool:
 
 
 def _maybe_install_fp8_stream(block, stream: str) -> None:
-    """Quantize the attn qkv/proj + mlp up/down Linears of one stream ("img" or "txt")
-    to FP8. Idempotent per (block, stream); the original bf16 Linears are left in place."""
+    """Quantize one DiT stream to FP8 and release its superseded BF16 weights.
+
+    Idempotent per (block, stream). The FP8 twins fully replace the original
+    Linear weights in forward, so retaining both copies only wastes about
+    31 GiB across the complete image and text streams.
+    """
     if not _fp8_stream_wanted(stream):
         return
     installed_flag = f"_fp8_{stream}_installed"
@@ -90,6 +94,17 @@ def _maybe_install_fp8_stream(block, stream: str) -> None:
     _approx = getattr(gelu_mod, "approximate", "tanh") if gelu_mod is not None else "tanh"
     setattr(block, f"_{stream}_mlp_act",
             lambda x, _a=_approx: torch.nn.functional.gelu(x, approximate=_a))
+
+    # Bias tensors remain shared with the FP8 twins. Only the superseded BF16
+    # weights are released; keeping them doubles the DiT weight residency and
+    # can exhaust a 96 GiB RTX PRO 6000 during compiled warmup.
+    for lin in (
+        getattr(block, f"{stream}_attn_qkv"),
+        getattr(block, f"{stream}_attn_proj"),
+        up_lin,
+        down_lin,
+    ):
+        lin.weight.data = lin.weight.data.new_empty(0)
     setattr(block, installed_flag, True)
 
 

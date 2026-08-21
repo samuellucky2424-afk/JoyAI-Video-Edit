@@ -171,6 +171,53 @@ def _load_vae_for_device(cfg: ExpConfig, device: torch.device) -> torch.nn.Modul
     vae.eval()
     return vae
 
+
+def _canonical_device(device: torch.device | str) -> torch.device:
+    device_obj = torch.device(device)
+    if device_obj.type == "cuda" and device_obj.index is None:
+        return torch.device("cuda", torch.cuda.current_device())
+    return device_obj
+
+
+def _clone_vae_shared_weights(src: torch.nn.Module) -> torch.nn.Module:
+    """Create a separate VAE state handle that shares the source weight tensors.
+
+    Encode, decode, and pseudo-encode need independent streaming state, but
+    colocated roles do not need separate copies of the 1.4 GiB VAE weights.
+    """
+    from xvideo.models.vae import XVAEChunkCausal
+
+    for module in src.modules():
+        if isinstance(module, torch.nn.Conv3d):
+            module.weight.data = module.weight.data.to(
+                memory_format=torch.channels_last_3d
+            )
+    with torch.device("meta"):
+        clone = XVAEChunkCausal.from_config(src.config)
+    clone.load_state_dict(src.state_dict(), assign=True)
+    clone.requires_grad_(False)
+    return clone.eval()
+
+
+def _log_cuda_memory(stage: str, device: torch.device | str) -> None:
+    """Emit compact VRAM checkpoints so startup failures identify their stage."""
+    device_obj = _canonical_device(device)
+    if device_obj.type != "cuda" or not torch.cuda.is_available():
+        return
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device_obj)
+    allocated_bytes = torch.cuda.memory_allocated(device_obj)
+    reserved_bytes = torch.cuda.memory_reserved(device_obj)
+    gib = float(2**30)
+    print(
+        f"#####[VRAM] {stage}: "
+        f"allocated={allocated_bytes / gib:.2f} GiB, "
+        f"reserved={reserved_bytes / gib:.2f} GiB, "
+        f"free={free_bytes / gib:.2f} GiB, "
+        f"total={total_bytes / gib:.2f} GiB",
+        flush=True,
+    )
+
+
 class JoyOmniRuntime:
     def __init__(
         self,
@@ -249,6 +296,7 @@ class JoyOmniRuntime:
             dit.config.use_inference_kv_cache = True
         dit.requires_grad_(False)
         dit.eval()
+        _log_cuda_memory("DiT loaded (BF16 before FP8 warmup)", device_obj)
 
         try:
             from xvideo.models.dit import warmup_attention_backend as _warmup_fa
@@ -262,18 +310,54 @@ class JoyOmniRuntime:
         pipeline = load_pipeline(cfg, dit, device_obj)
         pipeline.vae.requires_grad_(False)
         pipeline.vae.eval()
+        _log_cuda_memory(
+            "pipeline loaded (text encoder + encode VAE)",
+            device_obj,
+        )
         if vae_encode_device_obj is not None:
             pipeline.vae = pipeline.vae.to(vae_encode_device_obj)
             print(f"#####[STREAM] moved encode VAE to {vae_encode_device_obj}")
 
-        decode_vae = pipeline.vae
+        def _vae_for_role(
+            role: str,
+            target_device: torch.device,
+        ) -> torch.nn.Module:
+            target = _canonical_device(target_device)
+            for share_src in (pipeline.vae, decode_vae):
+                if (
+                    share_src is not None
+                    and _canonical_device(_module_device(share_src)) == target
+                ):
+                    print(
+                        f"#####[STREAM] {role} VAE shares weights on "
+                        f"{target_device}",
+                        flush=True,
+                    )
+                    return _clone_vae_shared_weights(share_src)
+            vae = _load_vae_for_device(cfg, target_device)
+            print(
+                f"#####[STREAM] loaded {role} VAE on {target_device}",
+                flush=True,
+            )
+            return vae
+
+        decode_vae = None
         if vae_decode_device_obj is not None:
-            decode_vae = _load_vae_for_device(cfg, vae_decode_device_obj)
-            print(f"#####[STREAM] loaded decode VAE on {vae_decode_device_obj}")
+            decode_vae = _vae_for_role("decode", vae_decode_device_obj)
+        if decode_vae is None:
+            decode_vae = pipeline.vae
+
         pseudo_encode_vae = decode_vae
         if vae_pseudo_device_obj is not None:
-            pseudo_encode_vae = _load_vae_for_device(cfg, vae_pseudo_device_obj)
-            print(f"#####[STREAM] loaded pseudo encode VAE on {vae_pseudo_device_obj}")
+            pseudo_encode_vae = _vae_for_role(
+                "pseudo encode",
+                vae_pseudo_device_obj,
+            )
+
+        _log_cuda_memory(
+            "VAE roles ready (shared weights where colocated)",
+            device_obj,
+        )
 
         if hasattr(pipeline, "set_progress_bar_config"):
             pipeline.set_progress_bar_config(disable=True)
@@ -287,6 +371,7 @@ class JoyOmniRuntime:
             _orientations.append((warmup_width, warmup_height))
         _stem_mod = pipeline.vae.stem
 
+        _log_cuda_memory("before VAE compile warmup", device_obj)
         try:
             _vc = _vae_compile_module()
             _lat_c = int(getattr(decode_vae, "latent_channels", 0) or 0)
@@ -349,6 +434,7 @@ class JoyOmniRuntime:
 
         if _env_on("JOYOMNI_VAE_COMPILE_STRICT"):
             _vae_compile_module().assert_runtime_ready()
+        _log_cuda_memory("after VAE compile warmup", device_obj)
 
         runtime = cls(
             cfg=cfg,
@@ -359,6 +445,7 @@ class JoyOmniRuntime:
             postprocess_device=postprocess_device_obj,
         )
 
+        _log_cuda_memory("before full-pipeline warmup", device_obj)
         try:
             if os.environ.get("JOYOMNI_SKIP_LOAD_WARMUP", "0").lower() in {"1", "true", "yes", "on"}:
                 print("#####[STREAM] load-time warmup skipped (JOYOMNI_SKIP_LOAD_WARMUP); "
@@ -372,6 +459,7 @@ class JoyOmniRuntime:
             print(f"#####[STREAM] full-pipeline warmup error ({_severity}): {_wexc!r}")
             if _warmup_strict:
                 raise RuntimeError("required full-pipeline warmup failed") from _wexc
+        _log_cuda_memory("after full-pipeline warmup phase", device_obj)
 
         if _env_on("JOYOMNI_LOAD_WARMUP_STRICT") and graph_env_enabled():
             ready_graphs = [runner for runner in runtime.graph_runners.values() if getattr(runner, "ready", False)]
