@@ -33,6 +33,13 @@ class FrameAuditTests(unittest.TestCase):
         self.assertEqual(report["latest_client"]["client_skip_total"], 2)
         self.assertEqual(report["coverage"]["wire_to_decoded"], 0.666667)
         self.assertEqual(report["coverage"]["wire_to_inference"], 0.333333)
+        self.assertFalse(
+            report["sequence_audit"]["every_recent_wire_frame_reached_inference"]
+        )
+        self.assertEqual(
+            report["sequence_audit"]["recent_wire_not_in_inference_ranges"],
+            [[2, 3]],
+        )
 
     def test_valid_count_excludes_flush_padding(self):
         audit = FRAME_AUDIT.FrameAudit()
@@ -41,3 +48,53 @@ class FrameAuditTests(unittest.TestCase):
         report = audit.snapshot()
         self.assertEqual(report["stages"]["inference"]["count"], 2)
         self.assertEqual(report["stages"]["inference"]["non_monotonic"], 0)
+
+    def test_exact_sequences_find_drop_when_stage_counts_match(self):
+        audit = FRAME_AUDIT.FrameAudit()
+        audit.observe("wire", [{"seq": 10}, {"seq": 11}, {"seq": 12}])
+        audit.observe("inference", [{"seq": 10}, {"seq": 12}, {"seq": 13}])
+
+        report = audit.snapshot()
+        self.assertEqual(report["coverage"]["wire_to_inference"], 1.0)
+        self.assertFalse(
+            report["sequence_audit"]["every_recent_wire_frame_reached_inference"]
+        )
+        self.assertEqual(
+            report["sequence_audit"]["recent_wire_not_in_inference_ranges"],
+            [[11, 11]],
+        )
+        self.assertEqual(
+            report["sequence_audit"]["recent_inference_not_in_wire_ranges"],
+            [[13, 13]],
+        )
+
+    def test_sequence_window_is_bounded_and_disclosed(self):
+        audit = FRAME_AUDIT.FrameAudit(sequence_window=2)
+        audit.observe("wire", [{"seq": 1}, {"seq": 2}, {"seq": 3}])
+        audit.observe("inference", [{"seq": 2}, {"seq": 3}])
+
+        report = audit.snapshot()
+        sequence_audit = report["sequence_audit"]
+        self.assertTrue(sequence_audit["window_truncated"])
+        self.assertIn("wire", sequence_audit["window_truncated_stages"])
+        self.assertTrue(sequence_audit["every_recent_wire_frame_reached_inference"])
+        self.assertEqual(sequence_audit["recent_wire_not_in_inference_count"], 0)
+
+    def test_reports_output_coverage(self):
+        audit = FRAME_AUDIT.FrameAudit()
+        metas = [{"seq": 20}, {"seq": 21}]
+        audit.observe("wire", metas)
+        audit.observe("inference", metas)
+        audit.observe("output", [metas[0]])
+
+        report = audit.snapshot()
+        self.assertEqual(report["coverage"]["wire_to_output"], 0.5)
+        self.assertEqual(report["coverage"]["inference_to_output"], 0.5)
+        self.assertEqual(
+            report["sequence_audit"]["recent_inference_not_in_output_ranges"],
+            [[21, 21]],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
