@@ -7,6 +7,7 @@ on:
       - vast-mouth-control-v1
     paths:
       - Dockerfile.vast
+      - deploy/**
       - vast/**
       - .github/workflows/build-vast-image.yml
   workflow_dispatch:
