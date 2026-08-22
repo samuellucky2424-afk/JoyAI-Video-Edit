@@ -225,9 +225,10 @@
     <span class="kvreset-field keep-min">
       <span data-i18n="upload_quality">上传清晰度</span>
       <span id="upqTier" class="qtier">
-        <button type="button" data-upq="0.2" class="on" data-i18n="q_low">低</button>
+        <button type="button" data-upq="0.2" data-i18n="q_low">低</button>
         <button type="button" data-upq="0.4" data-i18n="q_mid">中</button>
         <button type="button" data-upq="0.6" data-i18n="q_high">高</button>
+        <button type="button" data-upq="auto" class="on" data-i18n="q_auto">自动</button>
       </span>
     </span>
     <span class="kvreset-field keep-min" style="display:none">
@@ -272,7 +273,7 @@
     <div><input id="fps" type="number" value="20" min="1" max="32" /></div>
   </div>
   <div class="row">
-    <div><input id="quality" type="number" value="0.2" min="0.1" max="1" step="0.01" /></div>
+    <div><input id="quality" type="number" value="0.6" min="0.1" max="1" step="0.01" /></div>
   </div>
   <input id="steps" type="number" value="2" min="1" max="8" />
   <select id="vaePosteriorMode">
@@ -361,7 +362,7 @@ const I18N = {
     edit_processing: "✨ 正在编辑",
     q_downgrade_auto: " · 已自动降到低画质", q_downgrade_hint: " · 建议降低画质",
     flow_drop_tail: " · 带宽不足，正在丢帧保延迟",
-    up_clamp_tail: " · 上行带宽不足，已临时降低上传画质",
+    up_auto_tail: " · 上行已自动降至中档",
     res_notice: "本演示运行在 {res}，并非模型原生的 1248×720 分辨率，画质与编辑效果会略有下降",
   },
   en: {
@@ -425,7 +426,7 @@ const I18N = {
     edit_processing: "✨ Editing",
     q_downgrade_auto: " · auto-lowered to low quality", q_downgrade_hint: " · consider lowering quality",
     flow_drop_tail: " · bandwidth limited, dropping frames",
-    up_clamp_tail: " · uplink limited, upload quality lowered",
+    up_auto_tail: " · uplink auto-lowered to mid",
     res_notice: "This demo runs at {res}, not the model's native 1248×720 resolution; visual quality and edit fidelity are slightly reduced",
   },
 };
@@ -703,14 +704,9 @@ let upDelayHist = [];
 let downDelayMs = null;
 let downSkewMin = null;
 let downSkewAt = 0;
-let upClamped = false;
-let upClearStreak = 0;
-let upClearNeed = 4;
-let upDrainFactor = 1;
-let upDrainHigh = 0;
-let upDrainClear = 0;
-let upDrainNeed = 5;
-let upSkipCounter = 0;
+let upAuto = true;
+let upAutoHigh = true;
+let upAutoClear = 0;
 let upDropTotal = 0;
 let upDropAt = 0;
 let upResumeKeyframe = false;
@@ -1255,13 +1251,15 @@ function updateMetrics() {
     const _rtt = netRttLastMs;
     const _hi = _rtt !== null && _rtt !== undefined && _rtt > 300;
     const _fd = flowDropAt > 0 && Date.now() - flowDropAt < 3000;
-    const _uc = upClamped || upDrainFactor < 1 || (upDropAt > 0 && Date.now() - upDropAt < 3000);
+    const _ua = upAuto && !upAutoHigh && ws && ws.readyState === WebSocket.OPEN;
+    const _ud = upDropAt > 0 && Date.now() - upDropAt < 3000;
     let _tail = "";
     if (_hi) _tail = autoQuality ? (autoQTier < 2 ? t("q_downgrade_auto") : "") : t("q_downgrade_hint");
-    if (_uc) _tail = t("up_clamp_tail");
+    if (_ua) _tail = t("up_auto_tail");
+    if (_ud) _tail = t("flow_drop_tail");
     if (_fd) _tail = t("flow_drop_tail");
     netReadoutEl.textContent = t("net_label") + " " + fmt(_rtt, "ms") + _tail;
-    netReadoutEl.classList.toggle("net-warn", _hi || _fd || _uc);
+    netReadoutEl.classList.toggle("net-warn", _hi || _fd || _ua || _ud);
   }
   if (dispLatencyEl) {
     dispLatencyEl.textContent = t("disp_label") + " " + fmt(editLatencyLastMs, "ms");
@@ -1411,10 +1409,11 @@ function resetRunMetrics() {
   downDelayMs = null;
   downSkewMin = null;
   downSkewAt = 0;
-  upClearStreak = 0;
-  upDrainHigh = 0;
-  upDrainClear = 0;
-  upDrainNeed = 5;
+  upAutoHigh = true;
+  upAutoClear = 0;
+  upDropTotal = 0;
+  upDropAt = 0;
+  syncUpQualityUi();
   upResumeKeyframe = false;
   serverChunkLastSec = null;
   chunkProfileLast = null;
@@ -1483,71 +1482,45 @@ let identityFidelityMode = false;
 let upSeq = 0;
 const upPendingByTs = new Map();
 
-const UP_CLAMP_Q = 0.2;
-
 function effectiveUpQuality() {
-  const q = Number(document.getElementById("quality").value) || 0.4;
-  return upClamped ? Math.min(q, UP_CLAMP_Q) : q;
+  if (upAuto) return upAutoHigh ? 0.6 : 0.4;
+  return Number(document.getElementById("quality").value) || 0.4;
 }
 
 function upEncoderBitrate(width, height) {
   const REF_PX = 1248 * 720;
   const identityMultiplier = identityFidelityMode ? IDENTITY_UPLINK_BITRATE_MULTIPLIER : 1.0;
-  const REF_BITRATE = (effectiveUpQuality() || 0.4) * 4000000 * upDrainFactor * identityMultiplier;
+  const REF_BITRATE = effectiveUpQuality() * 4000000 * identityMultiplier;
   const REF_FPS = 16;
   return Math.round(REF_BITRATE * (width * height / REF_PX) * Math.sqrt(sendTargetFps() / REF_FPS));
 }
 
 function uplinkCongestionTick() {
+  if (!upAuto) return;
   if (!(ws && ws.readyState === WebSocket.OPEN && sessionGranted)) return;
   if (usingVideoFile) return;
   const buf = ws.bufferedAmount || 0;
   const upLow = upDelayHist.length
     ? Math.min.apply(null, upDelayHist.slice(-3))
     : null;
-  const congested = (upLow !== null && upLow > 350) || buf > 262144;
-  if (!upClamped) {
-    if (congested && effectiveUpQuality() > UP_CLAMP_Q + 0.001) {
-      upClamped = true;
-      upClearStreak = 0;
-      upClearNeed = Math.min(60, upClearNeed * 2);
-      try { resetUplinkEncoder(); } catch (e) {}
+  if (upAutoHigh) {
+    if ((upLow !== null && upLow > 350) || buf > 262144) {
+      upAutoHigh = false;
+      upAutoClear = 0;
+      resetUplinkEncoder();
+      highlightUpqTier("auto");
       updateMetrics();
     }
   } else {
     const clear = (upLow === null || upLow < 120) && buf < 65536;
-    upClearStreak = clear ? upClearStreak + 1 : 0;
-    if (upClearStreak >= upClearNeed) {
-      upClamped = false;
-      upClearStreak = 0;
-      try { resetUplinkEncoder(); } catch (e) {}
+    upAutoClear = clear ? upAutoClear + 1 : 0;
+    if (upAutoClear >= 8) {
+      upAutoHigh = true;
+      upAutoClear = 0;
+      resetUplinkEncoder();
+      highlightUpqTier("auto");
       updateMetrics();
     }
-  }
-  if (upLow !== null && upLow > 600) {
-    upDrainClear = 0;
-    upDrainHigh += 1;
-    if (upDrainHigh >= 3 && upDrainFactor > 0.25) {
-      upDrainFactor /= 2;
-      upDrainHigh = 0;
-      try { resetUplinkEncoder(); } catch (e) {}
-      updateMetrics();
-    }
-  } else if ((upLow === null || upLow < 200) && buf < 65536) {
-    upDrainHigh = 0;
-    if (upDrainFactor < 1) {
-      upDrainClear += 1;
-      if (upDrainClear >= upDrainNeed) {
-        upDrainFactor = Math.min(1, upDrainFactor * 2);
-        upDrainClear = 0;
-        upDrainNeed = Math.min(15, upDrainNeed * 2);
-        try { resetUplinkEncoder(); } catch (e) {}
-        updateMetrics();
-      }
-    }
-  } else {
-    upDrainHigh = 0;
-    upDrainClear = 0;
   }
 }
 
@@ -1580,7 +1553,7 @@ function uplinkFrameMeta(seq, captureSeq, tCaptureMs) {
     camera_frame_seq: cameraFrameTotal,
     client_skip_total: sendRealtimeSkips,
     client_uplink_drop_total: upDropTotal,
-    client_drain_factor: upDrainFactor,
+    client_drain_factor: 1.0,
     ...mouthMeta,
     ...mouthDetailPatchMeta(mouthMeta),
   };
@@ -1617,20 +1590,10 @@ function ensureUplinkEncoder(width, height) {
 }
 
 function encodeUplinkFrame(width, height, captureSeq) {
-  upSkipCounter += 1;
-  const _mod = upDrainFactor <= 0.25 ? 3 : (upDrainFactor <= 0.5 ? 2 : 1);
-  const drainWouldSkip = _mod > 1 && (upSkipCounter % _mod) !== 0;
-  const mouthEvent = drainWouldSkip ? freshSignificantMouthEvent() : null;
-  if (drainWouldSkip && !mouthEvent) return;
-  if (mouthEvent) markMouthEventPreserved(mouthEvent);
   drawCaptureFrame(width, height);
   ensureUplinkEncoder(width, height);
   const seq = ++upSeq;
   const frameMeta = uplinkFrameMeta(seq, captureSeq, Date.now());
-  if (mouthEvent) {
-    frameMeta.mouth_event_preserved = true;
-    frameMeta.mouth_event_camera_frame_seq = mouthEvent.cameraFrameSeq;
-  }
   upPendingByTs.set(seq, frameMeta);
   let forceKey = false;
   if (upResumeKeyframe && ws && (ws.bufferedAmount || 0) < 131072) {
@@ -1861,13 +1824,12 @@ async function tick() {
     }
     const width = Number(document.getElementById("width").value);
     const height = Number(document.getElementById("height").value);
-    const quality = Number(document.getElementById("quality").value);
     if (upCodecH264) {
       encodeUplinkFrame(width, height, captureSeq);
       updateMetrics();
       return;
     }
-    const blob = await frameBlob(width, height, quality);
+    const blob = await frameBlob(width, height, effectiveUpQuality());
     if (!blob || ws.readyState !== WebSocket.OPEN) return;
     const seq = sentFrames + 1;
     const tCaptureMs = Date.now();
@@ -1899,7 +1861,7 @@ async function sendCurrentVideoFrame(mediaTimeSec) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
-  const quality = Number(document.getElementById("quality").value);
+  const quality = effectiveUpQuality();
   const blob = await frameBlob(width, height, quality);
   if (!blob || ws.readyState !== WebSocket.OPEN) return false;
   const seq = sentFrames + 1;
@@ -2964,20 +2926,34 @@ for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "va
 }
 var upqTierEl = document.getElementById("upqTier");
 const qualityLegacyEl = document.getElementById("quality");
-function highlightUpqTier(v) {
+function highlightUpqTier(which) {
   if (!upqTierEl) return;
   for (const b of upqTierEl.querySelectorAll("button")) {
-    b.classList.toggle("on", Number(b.getAttribute("data-upq")) === Number(v));
+    b.classList.toggle("on", b.getAttribute("data-upq") === String(which));
+    b.classList.remove("auto-active");
+  }
+  if (which === "auto") {
+    const current = upAutoHigh ? "0.6" : "0.4";
+    for (const b of upqTierEl.querySelectorAll("button")) {
+      if (b.getAttribute("data-upq") === current) b.classList.add("auto-active");
+    }
   }
 }
 function syncUpQualityUi() {
-  highlightUpqTier(qualityLegacyEl ? qualityLegacyEl.value : "0.6");
+  highlightUpqTier(upAuto ? "auto" : qualityLegacyEl.value);
 }
 if (upqTierEl) {
   for (const b of upqTierEl.querySelectorAll("button")) {
     b.addEventListener("click", () => {
       const v = b.getAttribute("data-upq");
-      if (qualityLegacyEl) qualityLegacyEl.value = v;
+      if (v === "auto") {
+        upAuto = true;
+        upAutoHigh = true;
+        upAutoClear = 0;
+      } else {
+        upAuto = false;
+        qualityLegacyEl.value = v;
+      }
       highlightUpqTier(v);
       resetUplinkEncoder();
       updateMetrics();

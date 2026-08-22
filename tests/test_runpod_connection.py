@@ -215,7 +215,7 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertNotIn('id="outputToast"', html)
         self.assertNotIn('id="sendHint"', html)
         self.assertIn('class="kvreset-field keep-min" style="display:none"', html)
-        self.assertIn('data-upq="0.2" class="on"', html)
+        self.assertIn('data-upq="auto" class="on"', html)
         self.assertIn('data-fps="20" class="on"', html)
         self.assertIn("let autoQTier = 0;", html)
         self.assertIn("const DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS = 100;", html)
@@ -507,13 +507,19 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("| Idle timeout | `60` seconds |", text)
         self.assertIn("soft", text)
 
-    def test_significant_mouth_events_only_bypass_client_drain_skips(self):
+    def test_uplink_auto_quality_preserves_motion_detail(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
-        self.assertIn("function freshSignificantMouthEvent", html)
-        self.assertIn("const drainWouldSkip =", html)
-        self.assertIn("if (drainWouldSkip && !mouthEvent) return;", html)
-        self.assertIn("frameMeta.mouth_event_preserved = true;", html)
+        self.assertIn("let upAuto = true;", html)
+        self.assertIn("return upAutoHigh ? 0.6 : 0.4;", html)
+        self.assertIn('data-upq="auto" class="on"', html)
+        self.assertIn('up_auto_tail: " · uplink auto-lowered to mid"', html)
+        self.assertIn("client_uplink_drop_total: upDropTotal", html)
+        self.assertIn("client_drain_factor: 1.0", html)
         self.assertIn("backendPendingFrames() >= MAX_BACKEND_PENDING_FRAMES", html)
+        self.assertNotIn("UP_CLAMP_Q", html)
+        self.assertNotIn("upDrainFactor", html)
+        self.assertNotIn("drainWouldSkip", html)
+        self.assertNotIn("uplink limited, upload quality lowered", html)
 
 
 if __name__ == "__main__":
