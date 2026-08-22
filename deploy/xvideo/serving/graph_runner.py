@@ -72,9 +72,6 @@ class StreamingGraphRunner:
         self.in_latent = torch.zeros(latent_shape, device=device, dtype=dtype)
         self.in_timestep = torch.zeros((latent_shape[0],), device=device, dtype=torch.float32)
         self.in_ref_latent = torch.zeros(latent_shape, device=device, dtype=dtype)
-        self.in_ref_value_scale = torch.ones(
-            (latent_shape[0], chunk_tokens), device=device, dtype=dtype
-        )
         self.in_store_latent = torch.zeros(latent_shape, device=device, dtype=dtype)
         self.in_store_timestep = torch.zeros((latent_shape[0],), device=device, dtype=dtype)
         self.in_prompt = torch.zeros((1, self.txt_len, int(transformer.config.text_states_dim)),
@@ -111,7 +108,6 @@ class StreamingGraphRunner:
                         timestep=self.in_timestep,
                         encoder_hidden_states=self.in_prompt,
                         ref_video_latent=self.in_ref_latent,
-                        ref_video_value_scale=self.in_ref_value_scale,
                         current_temporal_ids=self.in_current_ids,
                         cached_temporal_ids=None,
                         kv_cache_mode="reuse",

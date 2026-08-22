@@ -358,9 +358,10 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("mouth_control_enabled=mouth_control_enabled", server)
         self.assertIn('"mouth_control": session_settings.mouth_control_enabled', server)
         self.assertIn("mouth_control_enabled: bool = False", runtime)
-        self.assertIn("source_metas=encoded.job.source_metas", runtime)
-        self.assertIn("runner.in_ref_value_scale.fill_(1.0)", runtime)
-        self.assertIn("self.in_ref_value_scale = torch.ones(", graph_runner)
+        self.assertIn("apply_mouth_detail_patch(", server)
+        self.assertIn('"mouth_patch": payload.get("mouth_patch")', server)
+        self.assertNotIn("ref_video_value_scale", runtime)
+        self.assertNotIn("in_ref_value_scale", graph_runner)
 
     def test_vae_posterior_mode_is_selectable_per_session(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()

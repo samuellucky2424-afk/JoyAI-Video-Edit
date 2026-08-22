@@ -3,9 +3,6 @@ import sys
 import unittest
 from pathlib import Path
 
-import numpy as np
-
-
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 if str(DEPLOY) not in sys.path:
@@ -91,10 +88,6 @@ class MouthControlTests(unittest.TestCase):
                     samples, enabled=enabled, max_gain=1.35
                 )
                 self.assertFalse(control.active)
-                scale = MOUTH_CONTROL.mouth_control_token_scale(
-                    control, temporal_tokens=1, height_tokens=12, width_tokens=20
-                )
-                np.testing.assert_array_equal(scale, np.ones((1, 240), dtype=np.float32))
 
     def test_unhashable_tracker_sequence_does_not_break_control(self):
         sample = meta(["malformed"], anatomy_payload=anatomy(teeth=0.9))
@@ -103,25 +96,6 @@ class MouthControlTests(unittest.TestCase):
         )
         self.assertTrue(control.active)
         self.assertEqual(control.sample_count, 1)
-
-    def test_feathered_scale_only_changes_tokens_near_the_mouth(self):
-        control = MOUTH_CONTROL.MouthControl(
-            active=True,
-            roi=(0.4, 0.4, 0.2, 0.2),
-            gain=1.35,
-            strength=1.0,
-            confidence=1.0,
-            sample_count=1,
-            reason="active",
-        )
-        scale = MOUTH_CONTROL.mouth_control_token_scale(
-            control, temporal_tokens=1, height_tokens=20, width_tokens=20
-        ).reshape(20, 20)
-        self.assertEqual(float(scale[0, 0]), 1.0)
-        self.assertAlmostEqual(float(scale[10, 10]), 1.35, places=5)
-        self.assertGreater(float(scale[7, 10]), 1.0)
-        self.assertLess(float(scale[7, 10]), 1.35)
-
 
 if __name__ == "__main__":
     unittest.main()

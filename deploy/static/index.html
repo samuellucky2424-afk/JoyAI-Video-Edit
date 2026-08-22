@@ -292,6 +292,7 @@
 </div>
 <canvas id="capture" style="display:none"></canvas>
 <canvas id="mouthCapture" style="display:none"></canvas>
+<canvas id="mouthPatchCapture" style="display:none"></canvas>
 <div id="refLightbox" class="ref-lightbox"><img id="refLightboxImg" alt="reference enlarged" /></div>
 <script>
 const SERVER_DEFAULTS = (typeof __SERVER_DEFAULTS__ === "undefined")
@@ -472,6 +473,7 @@ let REF_IMAGES = {};
 const camera = document.getElementById("camera");
 const capture = document.getElementById("capture");
 const mouthCapture = document.getElementById("mouthCapture");
+const mouthPatchCapture = document.getElementById("mouthPatchCapture");
 const outputImg = document.getElementById("outputImg");
 const outputCanvas = document.getElementById("outputCanvas");
 const outputCanvasCtx = outputCanvas.getContext("2d");
@@ -866,6 +868,71 @@ function mouthTrackerFrameMeta(nowMs) {
   };
 }
 
+function unitMouthScore(value) {
+  const score = Number(value);
+  return Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : 0;
+}
+
+function mouthDetailSignalActive(meta) {
+  if (!meta || !meta.mouth_landmark_available || !meta.mouth_roi) return false;
+  const ageMs = Number(meta.mouth_landmark_age_ms);
+  if (!Number.isFinite(ageMs) || ageMs > 180) return false;
+  const anatomy = meta.mouth_anatomy || {};
+  const evidence = anatomy.region_evidence || {};
+  const blend = meta.mouth_blendshapes || {};
+  const geometry = meta.mouth_geometry || {};
+  const smile = 0.5 * (
+    unitMouthScore(blend.mouthSmileLeft) +
+    unitMouthScore(blend.mouthSmileRight)
+  );
+  return Math.max(
+    meta.mouth_event_significant ? 1 : 0,
+    unitMouthScore(anatomy.appearance_motion),
+    unitMouthScore(evidence.teeth),
+    unitMouthScore(evidence.tongue),
+    unitMouthScore(evidence.oral_cavity),
+    unitMouthScore(blend.jawOpen),
+    unitMouthScore(blend.mouthFunnel),
+    unitMouthScore(blend.mouthPucker),
+    smile,
+    Math.min(1, unitMouthScore(geometry.motion) * 4),
+  ) >= 0.15;
+}
+
+function mouthDetailPatchMeta(meta) {
+  const control = document.getElementById("mouthControl");
+  if (!identityFidelityMode || !control || !control.checked) return {};
+  if (!mouthDetailSignalActive(meta) || !capture.width || !capture.height) return {};
+  const roi = meta.mouth_roi;
+  const x0 = Math.max(0, Math.min(capture.width - 1, Math.floor(Number(roi.x) * capture.width)));
+  const y0 = Math.max(0, Math.min(capture.height - 1, Math.floor(Number(roi.y) * capture.height)));
+  const x1 = Math.max(x0 + 1, Math.min(capture.width, Math.ceil((Number(roi.x) + Number(roi.width)) * capture.width)));
+  const y1 = Math.max(y0 + 1, Math.min(capture.height, Math.ceil((Number(roi.y) + Number(roi.height)) * capture.height)));
+  const sourceWidth = x1 - x0;
+  const sourceHeight = y1 - y0;
+  if (sourceWidth < 4 || sourceHeight < 4) return {};
+  const maxWidth = 240;
+  const maxHeight = 160;
+  const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
+  mouthPatchCapture.width = Math.max(4, Math.round(sourceWidth * scale));
+  mouthPatchCapture.height = Math.max(4, Math.round(sourceHeight * scale));
+  const patchContext = mouthPatchCapture.getContext("2d", { alpha: false });
+  patchContext.imageSmoothingEnabled = true;
+  patchContext.imageSmoothingQuality = "high";
+  patchContext.drawImage(
+    capture,
+    x0, y0, sourceWidth, sourceHeight,
+    0, 0, mouthPatchCapture.width, mouthPatchCapture.height,
+  );
+  try {
+    return {
+      mouth_patch: mouthPatchCapture.toDataURL("image/jpeg", 0.96),
+    };
+  } catch (error) {
+    return {};
+  }
+}
+
 function freshSignificantMouthEvent(nowMs = Date.now()) {
   const result = mouthTrackerLatest;
   if (!result || !result.facePresent || !result.significant) return null;
@@ -1145,10 +1212,12 @@ function renderStageTimings() {
   cards.push(statCell(t("stage_ws_buf"), (_wsBuf / 1024).toFixed(0) + " KB", _wsBuf > 131072 ? "warn" : ""));
   const _recvQ = (typeof outputFrameQueue !== "undefined" && outputFrameQueue) ? outputFrameQueue.length : 0;
   cards.push(statCell(t("stage_recv_q"), _recvQ + " · " + (outCodecH264 ? "h264" : "mjpeg"), _recvQ >= 16 ? "warn" : ""));
-  if (p.mouth_control_active !== undefined) {
-    const mouthActive = Number(p.mouth_control_active) === 1;
+  if (p.mouth_patch_applied !== undefined || p.mouth_control_active !== undefined) {
+    const mouthActive = Number(p.mouth_patch_applied) === 1;
     const mouthGain = Number(p.mouth_control_gain);
-    const mouthReason = String(p.mouth_control_reason || (mouthActive ? "active" : "inactive"));
+    const mouthReason = String(
+      p.mouth_patch_reason || p.mouth_control_reason || (mouthActive ? "active" : "inactive")
+    );
     const mouthValue = mouthActive && Number.isFinite(mouthGain)
       ? `${mouthGain.toFixed(2)}x · ${mouthReason}`
       : `off · ${mouthReason}`;
@@ -1503,6 +1572,7 @@ function resetUplinkEncoder() {
 }
 
 function uplinkFrameMeta(seq, captureSeq, tCaptureMs) {
+  const mouthMeta = mouthTrackerFrameMeta(Date.now());
   return {
     seq,
     t_capture_ms: tCaptureMs,
@@ -1511,7 +1581,8 @@ function uplinkFrameMeta(seq, captureSeq, tCaptureMs) {
     client_skip_total: sendRealtimeSkips,
     client_uplink_drop_total: upDropTotal,
     client_drain_factor: upDrainFactor,
-    ...mouthTrackerFrameMeta(Date.now()),
+    ...mouthMeta,
+    ...mouthDetailPatchMeta(mouthMeta),
   };
 }
 

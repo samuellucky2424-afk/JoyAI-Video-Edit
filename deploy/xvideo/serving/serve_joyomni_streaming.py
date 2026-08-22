@@ -38,6 +38,7 @@ from xvideo.serving.mouth_control import (
     MOUTH_CONTROL_MAX_GAIN,
     MOUTH_CONTROL_MIN_GAIN,
 )
+from xvideo.serving.mouth_patch import apply_mouth_detail_patch
 
 DEFAULT_DIT_CKPT = ""
 DEFAULT_FACE_DETECTOR_ONNX = str(REPO_ROOT / "deps" / "checkpoints" / "face_detection_yunet_2023mar.onnx")
@@ -928,6 +929,38 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             if not source_metas:
                 source_metas = [{} for _ in range(count)]
 
+            # Surface bounded mouth-patch diagnostics without echoing or
+            # retaining the JPEG payload itself.
+            _mouth_meta = next(
+                (
+                    item
+                    for item in reversed(source_metas)
+                    if item.get("mouth_patch_applied")
+                ),
+                next(
+                    (
+                        item
+                        for item in reversed(source_metas)
+                        if "mouth_patch_applied" in item
+                    ),
+                    None,
+                ),
+            )
+            if _mouth_meta is not None:
+                for _key in (
+                    "mouth_control_active",
+                    "mouth_control_gain",
+                    "mouth_control_strength",
+                    "mouth_control_confidence",
+                    "mouth_control_reason",
+                    "mouth_patch_applied",
+                    "mouth_patch_reason",
+                    "mouth_patch_bytes",
+                    "mouth_patch_size",
+                ):
+                    if _key in _mouth_meta:
+                        profile[_key] = _mouth_meta[_key]
+
             _wire_chunk = h264_stream is not None or (
                 encoded_frames and isinstance(encoded_frames[0], (bytes, bytearray))
             )
@@ -1756,6 +1789,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "mouth_geometry": payload.get("mouth_geometry"),
                             "mouth_blendshapes": payload.get("mouth_blendshapes"),
                             "mouth_anatomy": payload.get("mouth_anatomy"),
+                            "mouth_patch": payload.get("mouth_patch"),
                             "mouth_event_significant": payload.get(
                                 "mouth_event_significant"
                             ),
@@ -1905,6 +1939,28 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     else:
                         frame = _decode_image(frame_bytes)
                     frame_audit.observe("decoded", [frame_meta])
+
+                    # Preserve the small high-quality source-mouth crop before
+                    # the unmodified JoyAI VAE/DiT path.  This never composites
+                    # source pixels into generated output and is an exact no-op
+                    # when the patch or its validated metadata is unavailable.
+                    frame, mouth_patch_profile = apply_mouth_detail_patch(
+                        frame,
+                        frame_meta,
+                        enabled=bool(
+                            session_settings
+                            and session_settings.mouth_control_enabled
+                        ),
+                        max_gain=(
+                            session_settings.mouth_control_gain
+                            if session_settings is not None
+                            else MOUTH_CONTROL_MIN_GAIN
+                        ),
+                    )
+                    frame_meta.update(mouth_patch_profile)
+                    frame_meta.pop("mouth_patch", None)
+                    if mouth_patch_profile.get("mouth_patch_applied"):
+                        frame_audit.observe("mouth_conditioned", [frame_meta])
 
                     if face_gate_pending:
                         _reason, _center, _nf = _check_face_gate(

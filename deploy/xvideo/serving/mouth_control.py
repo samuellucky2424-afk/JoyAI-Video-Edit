@@ -1,9 +1,10 @@
 """Safe runtime control derived from validated browser mouth metadata.
 
 The control never creates anatomy pixels and never changes model weights.  It
-only describes where a meaningful mouth event exists so the streaming runtime
-can give the already-encoded source-video mouth condition a bounded attention
-value boost.  Missing, stale, neutral, or malformed metadata is an exact no-op.
+only validates whether a fresh, meaningful mouth event and ROI exist.  The
+runtime may then preserve a high-quality copy of those *source* pixels before
+the normal JoyAI VAE path.  Missing, stale, neutral, or malformed metadata is
+an exact no-op.
 """
 
 from __future__ import annotations
@@ -11,8 +12,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
-
-import numpy as np
 
 from xvideo.serving.mouth_anatomy import (
     MouthAnatomyContractError,
@@ -204,48 +203,3 @@ def build_mouth_control(
         sample_count=len(candidates),
         reason="active",
     )
-
-
-def mouth_control_token_scale(
-    control: MouthControl,
-    *,
-    temporal_tokens: int,
-    height_tokens: int,
-    width_tokens: int,
-) -> np.ndarray:
-    shape = (1, temporal_tokens * height_tokens * width_tokens)
-    if (
-        not control.active
-        or control.roi is None
-        or temporal_tokens <= 0
-        or height_tokens <= 0
-        or width_tokens <= 0
-    ):
-        return np.ones(shape, dtype=np.float32)
-
-    x, y, width, height = control.roi
-    center_x = x + width * 0.5
-    center_y = y + height * 0.5
-    half_width = width * 0.5
-    half_height = height * 0.5
-    feather_x = max(1.0 / width_tokens, width * 0.35)
-    feather_y = max(1.0 / height_tokens, height * 0.35)
-    grid_x = (np.arange(width_tokens, dtype=np.float32) + 0.5) / width_tokens
-    grid_y = (np.arange(height_tokens, dtype=np.float32) + 0.5) / height_tokens
-    mask_x = np.clip(
-        (half_width + feather_x - np.abs(grid_x - center_x)) / feather_x,
-        0.0,
-        1.0,
-    )
-    mask_y = np.clip(
-        (half_height + feather_y - np.abs(grid_y - center_y)) / feather_y,
-        0.0,
-        1.0,
-    )
-    spatial_mask = mask_y[:, None] * mask_x[None, :]
-    spatial_scale = 1.0 + (float(control.gain) - 1.0) * spatial_mask
-    scale = np.broadcast_to(
-        spatial_scale,
-        (temporal_tokens, height_tokens, width_tokens),
-    ).reshape(1, -1)
-    return np.ascontiguousarray(scale, dtype=np.float32)
