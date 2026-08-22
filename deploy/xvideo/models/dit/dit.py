@@ -357,6 +357,7 @@ class MMDoubleStreamBlock(nn.Module):
         kv_cache_pre_rope: bool = False,
         cached_freqs_cis: Optional[tuple] = None,
         txt_side_stream: Optional[torch.cuda.Stream] = None,
+        img_value_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         _maybe_install_fp8_stream(self, "img")
         _fp8_on = _fp8_stream_enabled(self, "img")
@@ -423,6 +424,16 @@ class MMDoubleStreamBlock(nn.Module):
         )
         if not kv_cache_pre_rope:
             img_k_for_cache = img_k
+        if img_value_scale is not None:
+            if img_value_scale.shape != img_v.shape[:2]:
+                raise ValueError(
+                    "img_value_scale must match the image-token dimensions: "
+                    f"{tuple(img_value_scale.shape)} != {tuple(img_v.shape[:2])}"
+                )
+            img_v = img_v * img_value_scale.to(
+                device=img_v.device,
+                dtype=img_v.dtype,
+            ).unsqueeze(-1).unsqueeze(-1)
 
         if _txt_par:
             torch.cuda.current_stream().wait_event(_txt_qkv_ev)
@@ -943,6 +954,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         timestep: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         ref_video_latent: Optional[torch.Tensor] = None,
+        ref_video_value_scale: Optional[torch.Tensor] = None,
         current_temporal_ids: Optional[torch.Tensor] = None,
         cached_temporal_ids: Optional[torch.Tensor] = None,
         kv_cache_mode: Optional[str] = None,
@@ -991,6 +1003,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         latent_segments = [hidden_tokens]
         rotary_segments = [current_rotary]
         source_id_segments = [current_source_id]
+        visual_value_scale = None
 
         if ref_video_latent is not None:
             if ref_video_latent.shape[0] != batch_size:
@@ -1013,6 +1026,26 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             source_id_segments.append(
                 torch.full((ref_video_tokens.shape[1],), SOURCE_ID_EDIT_CONDITION, device=device, dtype=torch.float32)
             )
+            if ref_video_value_scale is not None:
+                expected_scale_shape = (batch_size, ref_video_tokens.shape[1])
+                if ref_video_value_scale.shape != expected_scale_shape:
+                    raise ValueError(
+                        "ref_video_value_scale must match ref-video token dimensions: "
+                        f"{tuple(ref_video_value_scale.shape)} != {expected_scale_shape}"
+                    )
+                visual_value_scale = torch.cat(
+                    [
+                        torch.ones(
+                            (batch_size, current_seq_len),
+                            device=device,
+                            dtype=ref_video_value_scale.dtype,
+                        ),
+                        ref_video_value_scale.to(device=device),
+                    ],
+                    dim=1,
+                )
+        elif ref_video_value_scale is not None:
+            raise ValueError("ref_video_value_scale requires ref_video_latent")
 
         img = torch.cat(latent_segments, dim=1)
         visual_source_id = torch.cat(source_id_segments, dim=0).unsqueeze(0)
@@ -1105,6 +1138,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 kv_cache_pre_rope=kv_cache_pre_rope,
                 cached_freqs_cis=cached_freqs_cis,
                 txt_side_stream=_txt_stream,
+                img_value_scale=visual_value_scale,
             )
 
         img = self.proj_out(self.norm_out(img))

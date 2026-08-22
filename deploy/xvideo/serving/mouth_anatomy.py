@@ -1,13 +1,13 @@
 """Validated metadata contract for landmark-aligned mouth appearance features.
 
-This module deliberately does not inspect frames or change JoyAI inference.  It
-defines the validation boundary for the browser feature encoder so that every
-stage uses the same names and score semantics before the metadata is allowed to
-influence any future frame-retention decision.
+This module deliberately does not inspect frames.  It defines the validation
+boundary for the browser feature encoder so that every stage uses the same
+names and score semantics before metadata is used for frame retention or the
+optional bounded runtime mouth control.
 
 The four region values are evidence scores in the MediaPipe-aligned mouth ROI;
-they are not pixel-perfect semantic masks and they are not model conditioning.
-JoyAI checkpoints, tensors, prompts, and generated frames are untouched.
+they are not pixel-perfect semantic masks.  The runtime may derive a source
+token scale from them, but this module does not alter checkpoints or pixels.
 """
 
 from __future__ import annotations

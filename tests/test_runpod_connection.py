@@ -336,6 +336,32 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn('"inference"', runtime)
         self.assertIn('"output"', runtime)
 
+    def test_mouth_control_is_live_testable_without_checkpoint_changes(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+        graph_runner = (
+            ROOT / "deploy" / "xvideo" / "serving" / "graph_runner.py"
+        ).read_text()
+
+        self.assertIn('id="mouthControl"', html)
+        self.assertIn('id="mouthControlGain"', html)
+        self.assertIn("mouth_control: mouthControl", html)
+        self.assertIn("mouth_control_gain:", html)
+        self.assertIn('t("stage_mouth")', html)
+        self.assertIn('payload.get("mouth_control", args.mouth_control)', server)
+        self.assertIn("and identity_lock", server)
+        self.assertIn("mouth_control_enabled=mouth_control_enabled", server)
+        self.assertIn('"mouth_control": session_settings.mouth_control_enabled', server)
+        self.assertIn("mouth_control_enabled: bool = False", runtime)
+        self.assertIn("source_metas=encoded.job.source_metas", runtime)
+        self.assertIn("runner.in_ref_value_scale.fill_(1.0)", runtime)
+        self.assertIn("self.in_ref_value_scale = torch.ones(", graph_runner)
+
     def test_vae_posterior_mode_is_selectable_per_session(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
         server = (

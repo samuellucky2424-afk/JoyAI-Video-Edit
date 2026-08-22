@@ -55,6 +55,10 @@ class FrameAudit:
         "mouth_geometry",
         "mouth_blendshapes",
         "mouth_anatomy",
+        "mouth_event_significant",
+        "mouth_event_camera_frame_seq",
+        "mouth_event_preserved",
+        "mouth_event_preserved_total",
         "mouth_tracker_processed_total",
         "mouth_tracker_drop_total",
     )

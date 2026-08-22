@@ -1,9 +1,10 @@
 /*
  * Lightweight appearance evidence inside MediaPipe's landmark-aligned mouth.
  *
- * The output is metadata only. It never paints over the source frame and it is
- * not passed into JoyAI model tensors. Region values are bounded evidence
- * scores, not pixel-perfect semantic segmentation masks.
+ * The output is metadata only and never paints over the source frame. JoyAI's
+ * optional runtime mouth control can convert the aligned ROI into a bounded
+ * source-token attention scale; the evidence is not a pixel-perfect semantic
+ * segmentation mask and never changes checkpoint weights.
  */
 
 export const MOUTH_ANATOMY_SCHEMA_VERSION = 1;

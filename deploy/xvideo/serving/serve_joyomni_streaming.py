@@ -34,6 +34,10 @@ from xvideo.serving.joyomni_streaming import (
     _module_device,
 )
 from xvideo.serving.frame_audit import FrameAudit
+from xvideo.serving.mouth_control import (
+    MOUTH_CONTROL_MAX_GAIN,
+    MOUTH_CONTROL_MIN_GAIN,
+)
 
 DEFAULT_DIT_CKPT = ""
 DEFAULT_FACE_DETECTOR_ONNX = str(REPO_ROOT / "deps" / "checkpoints" / "face_detection_yunet_2023mar.onnx")
@@ -672,6 +676,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "use_pe": args.use_pe,
             "pe_available": bool(os.environ.get("OPENAI_API_KEY")),
             "max_temporal_ids": args.max_temporal_ids,
+            "mouth_control": args.mouth_control,
+            "mouth_control_gain": args.mouth_control_gain,
             "record_enabled": args.record_dir is not None,
         }
         html = _load_index_html().replace("__SERVER_DEFAULTS__", json.dumps(server_defaults))
@@ -1456,6 +1462,34 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         reference_kv_scale = max(1.0, min(1.5, reference_kv_scale))
                         if not identity_lock:
                             reference_kv_scale = 1.0
+                        mouth_control_enabled = bool(
+                            payload.get("mouth_control", args.mouth_control)
+                        ) and identity_lock
+                        try:
+                            mouth_control_gain = float(
+                                payload.get(
+                                    "mouth_control_gain",
+                                    args.mouth_control_gain,
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            await _send_json({
+                                "type": "error",
+                                "message": "mouth_control_gain must be a number",
+                            })
+                            continue
+                        if not math.isfinite(mouth_control_gain):
+                            await _send_json({
+                                "type": "error",
+                                "message": "mouth_control_gain must be finite",
+                            })
+                            continue
+                        mouth_control_gain = max(
+                            MOUTH_CONTROL_MIN_GAIN,
+                            min(MOUTH_CONTROL_MAX_GAIN, mouth_control_gain),
+                        )
+                        if not mouth_control_enabled:
+                            mouth_control_gain = 1.0
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
                         # The reference KV is the long-lived identity anchor.
                         # Resetting the entire session drops both the generated
@@ -1594,6 +1628,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             reference_kv_scale=reference_kv_scale,
                             stabilize_identity_exposure=identity_lock,
                             vae_posterior_mode=vae_posterior_mode,
+                            mouth_control_enabled=mouth_control_enabled,
+                            mouth_control_gain=mouth_control_gain,
                             frame_audit=frame_audit,
                         )
 
@@ -1607,6 +1643,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "identity_lock": identity_lock,
                             "reference_kv_scale": reference_kv_scale,
                             "vae_posterior_mode": session_settings.vae_posterior_mode,
+                            "mouth_control": session_settings.mouth_control_enabled,
+                            "mouth_control_gain": session_settings.mouth_control_gain,
                         }
                         print(
                             "#####[SESSION-CONFIG] "
@@ -1631,6 +1669,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ws_debug["has_ref_image"] = ref_image is not None
                         ws_debug["identity_lock"] = identity_lock
                         ws_debug["reference_kv_scale"] = reference_kv_scale
+                        ws_debug["mouth_control"] = session_settings.mouth_control_enabled
+                        ws_debug["mouth_control_gain"] = session_settings.mouth_control_gain
                         ws_debug["session_config"] = session_config
                         ws_debug["last_message_type"] = "start"
                         await _send_json(
@@ -1646,6 +1686,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "reference_kv_scale": reference_kv_scale,
                                 "vae_posterior_mode": session_settings.vae_posterior_mode,
                                 "num_inference_steps": session_settings.num_inference_steps,
+                                "mouth_control": session_settings.mouth_control_enabled,
+                                "mouth_control_gain": session_settings.mouth_control_gain,
                                 "frame_audit": True,
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,
@@ -1714,6 +1756,18 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "mouth_geometry": payload.get("mouth_geometry"),
                             "mouth_blendshapes": payload.get("mouth_blendshapes"),
                             "mouth_anatomy": payload.get("mouth_anatomy"),
+                            "mouth_event_significant": payload.get(
+                                "mouth_event_significant"
+                            ),
+                            "mouth_event_camera_frame_seq": payload.get(
+                                "mouth_event_camera_frame_seq"
+                            ),
+                            "mouth_event_preserved": payload.get(
+                                "mouth_event_preserved"
+                            ),
+                            "mouth_event_preserved_total": payload.get(
+                                "mouth_event_preserved_total"
+                            ),
                             "mouth_tracker_processed_total": payload.get(
                                 "mouth_tracker_processed_total"
                             ),
@@ -2217,6 +2271,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-inference-steps", type=int, default=2)
     parser.add_argument("--fps", type=int, default=24, help="Client send/playback target fps; seeds the #fps UI control and paces the live camera. Recording follows each frame's t_capture_ms (media time for mp4 uploads, capture wall-clock for the live camera), so this does not set the recorded file's duration.")
     parser.add_argument("--use-pe", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--mouth-control",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable bounded MediaPipe ROI control for reference-person sessions.",
+    )
+    parser.add_argument(
+        "--mouth-control-gain",
+        type=float,
+        default=1.35,
+        help="Maximum dynamic source-mouth attention value gain (clamped to 1.0-1.5).",
+    )
     parser.add_argument("--pe-model", type=str, default=None)
     parser.add_argument("--pe-timeout-s", type=float, default=20.0, help="Hard wall-clock cap for deferred prompt-enhancement. On timeout the session degrades to the RAW prompt and starts editing, so a slow/hung PE endpoint (bad network / provider stall) can never wedge the client in the prompt-enhancement state.")
 

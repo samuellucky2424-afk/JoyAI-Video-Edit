@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import queue
 import threading
@@ -21,6 +22,12 @@ from xvideo.models.pipeline import (
 )
 from xvideo.serving.frame_audit import FrameAudit
 from xvideo.serving.graph_runner import GRAPH_WINDOW_CHUNKS, StreamingGraphRunner, graph_env_enabled
+from xvideo.serving.mouth_control import (
+    MOUTH_CONTROL_MAX_GAIN,
+    MOUTH_CONTROL_MIN_GAIN,
+    build_mouth_control,
+    mouth_control_token_scale,
+)
 from xvideo.utils import _dynamic_resize_from_bucket, seed_everything
 
 DEFAULT_REFERENCE_IMG_IV2V_BASESIZE = 768
@@ -102,6 +109,8 @@ class StreamingSettings:
     identity_exposure_max_ratio: float = 1.18
     identity_exposure_min_gain: float = 0.68
     vae_posterior_mode: str = "sample"
+    mouth_control_enabled: bool = False
+    mouth_control_gain: float = 1.35
     frame_audit: FrameAudit | None = None
 
 @dataclass
@@ -592,6 +601,17 @@ class JoyOmniV2VStreamingSession:
                 "vae_posterior_mode must be 'sample' or 'mode', "
                 f"got {settings.vae_posterior_mode!r}."
             )
+        if (
+            not math.isfinite(float(settings.mouth_control_gain))
+            or not MOUTH_CONTROL_MIN_GAIN
+            <= float(settings.mouth_control_gain)
+            <= MOUTH_CONTROL_MAX_GAIN
+        ):
+            raise ValueError(
+                "mouth_control_gain must be finite and in "
+                f"[{MOUTH_CONTROL_MIN_GAIN}, {MOUTH_CONTROL_MAX_GAIN}], "
+                f"got {settings.mouth_control_gain!r}."
+            )
         self.ref_image = ref_image.convert("RGB") if ref_image is not None else None
         self.ref_image_latent: torch.Tensor | None = None
         self.device = self.pipeline.transformer.device
@@ -928,6 +948,54 @@ class JoyOmniV2VStreamingSession:
             "postprocess_device": str(self.postprocess_device),
         }
 
+    def _mouth_ref_video_value_scale(
+        self,
+        source_metas: list[dict[str, Any]],
+        ref_chunk_latent: torch.Tensor,
+        profile: dict[str, Any],
+    ) -> torch.Tensor | None:
+        control = build_mouth_control(
+            source_metas,
+            enabled=self.settings.mouth_control_enabled,
+            max_gain=self.settings.mouth_control_gain,
+        )
+        profile.update(control.profile_fields())
+        if not control.active:
+            return None
+
+        patch_t, patch_h, patch_w = tuple(self.pipeline.transformer.patch_size)
+        latent_t, latent_h, latent_w = ref_chunk_latent.shape[2:]
+        if (
+            latent_t % patch_t != 0
+            or latent_h % patch_h != 0
+            or latent_w % patch_w != 0
+        ):
+            profile["mouth_control_active"] = 0
+            profile["mouth_control_reason"] = "unaligned_latent_shape"
+            return None
+        scale = mouth_control_token_scale(
+            control,
+            temporal_tokens=latent_t // patch_t,
+            height_tokens=latent_h // patch_h,
+            width_tokens=latent_w // patch_w,
+        )
+        value_scale = torch.from_numpy(scale).to(
+            device=self.device,
+            dtype=self.target_dtype,
+        )
+        expected_tokens = (
+            (latent_t // patch_t)
+            * (latent_h // patch_h)
+            * (latent_w // patch_w)
+        )
+        if value_scale.shape != (ref_chunk_latent.shape[0], expected_tokens):
+            raise RuntimeError(
+                "mouth control token scale shape mismatch: "
+                f"{tuple(value_scale.shape)} != "
+                f"{(ref_chunk_latent.shape[0], expected_tokens)}"
+            )
+        return value_scale
+
     def _graph_runner_for_chunk(
         self,
         *,
@@ -1071,6 +1139,7 @@ class JoyOmniV2VStreamingSession:
         runner,
         ref_chunk_latent: torch.Tensor,
         current_chunk_latents: torch.Tensor,
+        ref_video_value_scale: torch.Tensor | None,
         *,
         profile: dict[str, Any],
         history_chunk_ids: list[int],
@@ -1078,6 +1147,12 @@ class JoyOmniV2VStreamingSession:
     ) -> torch.Tensor:
         profile["graph_path"] = 1
         runner.in_ref_latent.copy_(ref_chunk_latent.to(self.target_dtype))
+        if ref_video_value_scale is None:
+            runner.in_ref_value_scale.fill_(1.0)
+        else:
+            runner.in_ref_value_scale.copy_(
+                ref_video_value_scale.to(dtype=self.target_dtype)
+            )
         started = self._timer_start(self.device)
         runner.in_noise.copy_(current_chunk_latents.to(self.target_dtype))
         runner.full_graph.replay()
@@ -1103,6 +1178,7 @@ class JoyOmniV2VStreamingSession:
         *,
         profile: dict[str, Any],
         chunk_idx: int,
+        source_metas: list[dict[str, Any]],
         frozen_anchor_id: int | None = None,
     ) -> torch.Tensor:
         noise_shape = (1, self.latent_channels, self.chunk_size, self.latent_h, self.latent_w)
@@ -1175,6 +1251,11 @@ class JoyOmniV2VStreamingSession:
 
         self.pipeline.scheduler.set_timesteps(self.settings.num_inference_steps, device=self.device)
         timesteps_for_chunk = self.pipeline.scheduler.timesteps
+        ref_video_value_scale = self._mouth_ref_video_value_scale(
+            source_metas,
+            ref_chunk_latent,
+            profile,
+        )
 
         runner = self._graph_runner_for_chunk(
             chunk_idx=chunk_idx,
@@ -1186,6 +1267,7 @@ class JoyOmniV2VStreamingSession:
                 runner,
                 ref_chunk_latent,
                 current_chunk_latents,
+                ref_video_value_scale,
                 profile=profile,
                 history_chunk_ids=history_chunk_ids,
                 active_chunk_id=active_chunk_id,
@@ -1211,6 +1293,7 @@ class JoyOmniV2VStreamingSession:
                         timestep=t_expand,
                         encoder_hidden_states=self.streaming_cond_embeds,
                         ref_video_latent=ref_chunk_latent,
+                        ref_video_value_scale=ref_video_value_scale,
                         current_temporal_ids=current_chunk_temporal_ids.unsqueeze(0).expand(
                             latent_model_input.shape[0], -1
                         ),
@@ -1430,6 +1513,8 @@ class JoyOmniV2VStreamingSession:
             "initialized": self.initialized,
             "has_ref_image": self.ref_image is not None,
             "reference_kv_scale": self.settings.reference_kv_scale,
+            "mouth_control": self.settings.mouth_control_enabled,
+            "mouth_control_gain": self.settings.mouth_control_gain,
             "chunk_idx_next": self.chunk_idx,
             "pending_frames": len(self.pending_frames),
             "frames_per_next_chunk": self.frames_per_next_chunk,
@@ -1609,6 +1694,7 @@ class JoyOmniV2VStreamingSession:
                             encoded.ref_chunk_latent,
                             profile=encoded.job.profile,
                             chunk_idx=encoded.job.chunk_idx,
+                            source_metas=encoded.job.source_metas,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
                         )
                         self._evict_after_store(

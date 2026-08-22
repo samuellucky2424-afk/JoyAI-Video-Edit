@@ -1,8 +1,9 @@
 /*
  * Browser-side MediaPipe mouth landmark telemetry.
  *
- * This worker is deliberately diagnostic-only. It never changes the video
- * frame sent to JoyAI and it does not alter model inputs, weights, or output.
+ * This worker never changes the video frame sent to JoyAI. It emits validated
+ * landmark/appearance metadata that diagnostics and the optional bounded
+ * runtime mouth control can consume; it never alters model weights or pixels.
  */
 
 import {
