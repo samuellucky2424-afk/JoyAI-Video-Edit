@@ -111,7 +111,15 @@ class BeamCloudDeploymentTests(unittest.TestCase):
         command = " ".join(self.config.joyai_entrypoint())
         self.assertIn(str(self.config.MODEL_READY_MARKER), command)
         self.assertIn("test -f", command)
+        self.assertIn("beam_cloud/README.md", command)
         self.assertIn("exec python3 /opt/joyai/vast/start.py", command)
+
+    def test_readme_documents_native_beam_handler_paths(self):
+        readme = (REPOSITORY_ROOT / "beam_cloud/README.md").read_text()
+        self.assertIn(r"beam_cloud\app.py:model_download", readme)
+        self.assertIn("beam_cloud/app.py:model_download", readme)
+        self.assertIn(r"beam_cloud\app.py:joyai", readme)
+        self.assertIn("beam_cloud/app.py:joyai", readme)
 
 
 if __name__ == "__main__":

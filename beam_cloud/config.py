@@ -71,7 +71,8 @@ def joyai_entrypoint() -> list[str]:
     command = (
         f'test -f "{marker}" || '
         f'{{ echo "Missing verified Beam model marker: {marker}"; '
-        'echo "Run: beam run beam_cloud/app.py:model_download"; exit 1; }; '
+        'echo "Run the model_download command for your OS from beam_cloud/README.md"; '
+        "exit 1; }; "
         "exec python3 /opt/joyai/vast/start.py"
     )
     return ["bash", "-lc", command]

@@ -23,18 +23,30 @@ Run these commands on the computer that will manage the Beam session:
 
 ```bash
 python -m pip install -r beam_cloud/requirements.txt
-beam configure --token YOUR_BEAM_TOKEN
+python -m beam configure default --token YOUR_BEAM_TOKEN
 ```
 
 Do not paste the Beam token into source code or chat. `beam configure` stores it
-in the Beam CLI configuration.
+in the Beam CLI configuration. Run the commands from the repository root (the
+folder that contains `beam_cloud`). On Windows, using `python -m beam` also
+avoids depending on whether the standalone `beam.exe` directory is on `PATH`.
 
 ## 2. Download and verify the models without a GPU
 
-From the repository root:
+From the repository root, use the command for the managing computer's operating
+system. Beam 0.2.207 converts only the native path separator into a Python module
+name, so the Windows and Unix spellings are intentionally different.
+
+Windows PowerShell:
+
+```powershell
+python -m beam run 'beam_cloud\app.py:model_download'
+```
+
+macOS or Linux:
 
 ```bash
-beam run beam_cloud/app.py:model_download
+python -m beam run beam_cloud/app.py:model_download
 ```
 
 This CPU-only job creates `joyai-models-v1`, downloads pinned revisions, fully
@@ -46,8 +58,8 @@ required file is valid. Rerunning the command is safe and resumes cached files.
 For a setup plus a two-to-five-hour live session, reserve eight hours:
 
 ```bash
-beam machine reserve --gpu RTXPro6000 --nodes 1 --ttl 8h --name joyai-rtx-pro-6000 --yes
-beam machine list
+python -m beam machine reserve --gpu RTXPro6000 --nodes 1 --ttl 8h --name joyai-rtx-pro-6000 --yes
+python -m beam machine list
 ```
 
 Do not reserve A100, H100, or H200 for this image. It is compiled for Blackwell
@@ -55,8 +67,16 @@ compute capability 12.0 and refuses an incompatible GPU before model loading.
 
 ## 4. Start JoyAI once
 
+Windows PowerShell:
+
+```powershell
+python -m beam run --detach 'beam_cloud\app.py:joyai'
+```
+
+macOS or Linux:
+
 ```bash
-beam run --detach beam_cloud/app.py:joyai
+python -m beam run --detach beam_cloud/app.py:joyai
 ```
 
 Beam prints the container ID and public URL. Open that URL directly; the same
@@ -71,8 +91,8 @@ and stop it immediately after the session.
 ## 5. Stop billing after every session
 
 ```bash
-beam container stop CONTAINER_ID
-beam machine release --pool joyai-rtx-pro-6000 --yes
+python -m beam container stop CONTAINER_ID
+python -m beam machine release --pool joyai-rtx-pro-6000 --yes
 ```
 
 The persistent model volume remains for the next session, so the model does not
