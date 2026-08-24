@@ -720,6 +720,8 @@ let lastServerResidenceMs = null;
 
 const MOUTH_TRACKER_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const HAND_TRACKER_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const MOUTH_TRACKER_WIDTH = 384;
 const MOUTH_TRACKER_INTERVAL_MS = 1000 / 15;
 const MOUTH_TRACKER_MAX_RESULT_AGE_MS = 350;
@@ -752,6 +754,7 @@ function sendMouthAudit(result) {
       geometry: result.geometry || null,
       blendshapes: result.blendshapes || null,
       anatomy: result.anatomy || null,
+      occlusion: result.occlusion || null,
       significant: Boolean(result.significant),
       processed_total: mouthTrackerProcessedTotal,
       drop_total: mouthTrackerDropTotal,
@@ -810,6 +813,7 @@ function ensureMouthTracker() {
   mouthTrackerWorker.postMessage({
     type: "init",
     modelUrl: MOUTH_TRACKER_MODEL_URL,
+    handModelUrl: HAND_TRACKER_MODEL_URL,
     delegate: "GPU",
   });
 }
@@ -848,6 +852,8 @@ function mouthTrackerFrameMeta(nowMs) {
   const result = mouthTrackerLatest;
   const age = result && result.captureTimeMs ? Math.max(0, nowMs - result.captureTimeMs) : null;
   const available = Boolean(result && result.facePresent && age !== null && age <= MOUTH_TRACKER_MAX_RESULT_AGE_MS);
+  const occlusion = available ? (result.occlusion || {}) : {};
+  const occlusionAvailable = Boolean(available && occlusion.available);
   return {
     mouth_landmark_available: available,
     mouth_landmark_seq: available ? result.cameraFrameSeq : null,
@@ -861,6 +867,14 @@ function mouthTrackerFrameMeta(nowMs) {
     mouth_event_preserved_total: mouthEventPreservedTotal,
     mouth_tracker_processed_total: mouthTrackerProcessedTotal,
     mouth_tracker_drop_total: mouthTrackerDropTotal,
+    identity_occlusion_available: occlusionAvailable,
+    identity_occlusion_risk: occlusionAvailable ? Boolean(occlusion.risk) : false,
+    identity_occlusion_overlap: occlusionAvailable
+      ? unitMouthScore(occlusion.overlap)
+      : 0,
+    identity_occlusion_hand_count: occlusionAvailable
+      ? Math.max(0, Number(occlusion.handCount) || 0)
+      : 0,
   };
 }
 
@@ -1971,6 +1985,8 @@ async function beginSession() {
     num_inference_steps: Number(document.getElementById("steps").value),
     use_pe: usePe,
     identity_lock: identityLock,
+    identity_occlusion_recovery: identityLock,
+    identity_recovery_clean_chunks: 2,
     mouth_control: mouthControl,
     mouth_control_gain: Number(document.getElementById("mouthControlGain").value) || 1.35,
     // The official RV2V anchor alone can copy appearance while underweighting

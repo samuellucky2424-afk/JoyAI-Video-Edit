@@ -1533,6 +1533,23 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         # legacy periodic hard reset.
                         if identity_lock:
                             kv_reset_frames = 0
+                        identity_occlusion_recovery = bool(
+                            payload.get("identity_occlusion_recovery", identity_lock)
+                        ) and identity_lock
+                        try:
+                            identity_recovery_clean_chunks = max(
+                                1,
+                                min(
+                                    4,
+                                    int(payload.get("identity_recovery_clean_chunks", 2)),
+                                ),
+                            )
+                        except (TypeError, ValueError):
+                            await _send_json({
+                                "type": "error",
+                                "message": "identity_recovery_clean_chunks must be an integer",
+                            })
+                            continue
                         output_quality = max(1, min(100, int(payload.get("output_quality", output_quality))))
                         lossless_mode = str(payload.get("source", "")) == "file"
                         _up_allow = args.uplink_codec == "auto" and not lossless_mode
@@ -1663,6 +1680,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             vae_posterior_mode=vae_posterior_mode,
                             mouth_control_enabled=mouth_control_enabled,
                             mouth_control_gain=mouth_control_gain,
+                            identity_occlusion_recovery=identity_occlusion_recovery,
+                            identity_recovery_clean_chunks=(
+                                identity_recovery_clean_chunks
+                            ),
                             frame_audit=frame_audit,
                         )
 
@@ -1678,6 +1699,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "vae_posterior_mode": session_settings.vae_posterior_mode,
                             "mouth_control": session_settings.mouth_control_enabled,
                             "mouth_control_gain": session_settings.mouth_control_gain,
+                            "identity_occlusion_recovery": (
+                                session_settings.identity_occlusion_recovery
+                            ),
+                            "identity_recovery_clean_chunks": (
+                                session_settings.identity_recovery_clean_chunks
+                            ),
                         }
                         print(
                             "#####[SESSION-CONFIG] "
@@ -1807,6 +1834,18 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             ),
                             "mouth_tracker_drop_total": payload.get(
                                 "mouth_tracker_drop_total"
+                            ),
+                            "identity_occlusion_available": payload.get(
+                                "identity_occlusion_available"
+                            ),
+                            "identity_occlusion_risk": (
+                                payload.get("identity_occlusion_risk") is True
+                            ),
+                            "identity_occlusion_overlap": payload.get(
+                                "identity_occlusion_overlap"
+                            ),
+                            "identity_occlusion_hand_count": payload.get(
+                                "identity_occlusion_hand_count"
                             ),
                         }
                     elif msg_type == "ack":

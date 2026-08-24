@@ -22,6 +22,7 @@ from xvideo.models.pipeline import (
 )
 from xvideo.serving.frame_audit import FrameAudit
 from xvideo.serving.graph_runner import GRAPH_WINDOW_CHUNKS, StreamingGraphRunner, graph_env_enabled
+from xvideo.serving.identity_recovery import IdentityRecoveryController
 from xvideo.serving.mouth_control import (
     MOUTH_CONTROL_MAX_GAIN,
     MOUTH_CONTROL_MIN_GAIN,
@@ -109,6 +110,8 @@ class StreamingSettings:
     vae_posterior_mode: str = "sample"
     mouth_control_enabled: bool = False
     mouth_control_gain: float = 1.35
+    identity_occlusion_recovery: bool = False
+    identity_recovery_clean_chunks: int = 2
     frame_audit: FrameAudit | None = None
 
 @dataclass
@@ -127,6 +130,10 @@ class _ChunkJob:
     profile: dict[str, Any]
     total_started: float
     frozen_anchor_id: int | None = None
+    identity_recovery_anchor_id: int | None = None
+    identity_recovery_active: bool = False
+    identity_recovery_release: bool = False
+    identity_occlusion_risk: bool = False
     valid_count: int | None = None
 
 @dataclass
@@ -659,6 +666,11 @@ class JoyOmniV2VStreamingSession:
         self.ref_image_kv_prefilled = False
         self._identity_exposure_gain = 1.0
         self._identity_exposure_active = False
+        self._identity_recovery = IdentityRecoveryController(
+            enabled=settings.identity_occlusion_recovery,
+            clean_chunks_to_release=settings.identity_recovery_clean_chunks,
+        )
+        self._identity_safe_pseudo_latent: torch.Tensor | None = None
 
         self.streaming_cond_embeds: torch.Tensor | None = None
         self.last_chunk_profile: dict[str, Any] | None = None
@@ -1122,6 +1134,7 @@ class JoyOmniV2VStreamingSession:
         profile: dict[str, Any],
         chunk_idx: int,
         frozen_anchor_id: int | None = None,
+        identity_recovery_anchor_id: int | None = None,
     ) -> torch.Tensor:
         noise_shape = (1, self.latent_channels, self.chunk_size, self.latent_h, self.latent_w)
         current_chunk_latents = randn_tensor(
@@ -1144,22 +1157,42 @@ class JoyOmniV2VStreamingSession:
         active_chunk_id = selected_chunk_ids[-1]
 
         gather_chunk_ids = selected_chunk_ids
+        history_anchor_id = (
+            identity_recovery_anchor_id
+            if identity_recovery_anchor_id is not None
+            else frozen_anchor_id
+        )
+        anchor_log_label = (
+            "IDENTITY-RECOVERY"
+            if identity_recovery_anchor_id is not None
+            else "FREEZE-KV"
+        )
         if (
-            frozen_anchor_id is not None and
+            history_anchor_id is not None and
             history_chunk_ids and
-            history_chunk_ids[-1] != frozen_anchor_id
+            history_chunk_ids[-1] != history_anchor_id
         ):
             old_tail = history_chunk_ids[-1]
 
             fz_history = history_chunk_ids[:-1]
-            anchor_is_dup = frozen_anchor_id in fz_history
-            fz_history_with_anchor = fz_history if anchor_is_dup else fz_history + [frozen_anchor_id]
+            anchor_is_dup = history_anchor_id in fz_history
+            # Identity recovery may intentionally seed the clean global sink
+            # into both graph history slots with distinct temporal positions.
+            # This preserves the fixed CUDA-graph shape when chunk 0 is the
+            # only known-good anchor. Static-scene freezing keeps its older
+            # duplicate-avoidance behavior.
+            allow_identity_duplicate = identity_recovery_anchor_id is not None
+            fz_history_with_anchor = (
+                fz_history + [history_anchor_id]
+                if allow_identity_duplicate or not anchor_is_dup
+                else fz_history
+            )
             fz_selected = fz_history_with_anchor + [active_chunk_id]
 
             disguised_tail = active_chunk_id - 1
             fz_gather_head = fz_history_with_anchor[:-1]
             degenerate = (
-                anchor_is_dup or
+                (anchor_is_dup and not allow_identity_duplicate) or
                 disguised_tail < 0 or
                 disguised_tail in fz_gather_head
             )
@@ -1168,14 +1201,14 @@ class JoyOmniV2VStreamingSession:
                 selected_chunk_ids = fz_selected
                 gather_chunk_ids = fz_gather_head + [disguised_tail, active_chunk_id]
                 print(
-                    f"#####[FREEZE-KV] chunk_idx={chunk_idx} tail {old_tail}->anchor "
-                    f"{frozen_anchor_id} (KV), pos-disguise->{disguised_tail}, "
+                    f"#####[{anchor_log_label}] chunk_idx={chunk_idx} tail {old_tail}->anchor "
+                    f"{history_anchor_id} (KV), pos-disguise->{disguised_tail}, "
                     f"kv_window={selected_chunk_ids} pos_window={gather_chunk_ids}",
                     flush=True,
                 )
             else:
                 print(
-                    f"#####[FREEZE-KV] chunk_idx={chunk_idx} anchor={frozen_anchor_id} "
+                    f"#####[{anchor_log_label}] chunk_idx={chunk_idx} anchor={history_anchor_id} "
                     f"degenerate (dup_or_collision), falling back to normal path",
                     flush=True,
                 )
@@ -1283,7 +1316,10 @@ class JoyOmniV2VStreamingSession:
         return current_chunk_latents
 
     def _evict_after_store(
-        self, chunk_idx: int, frozen_anchor_id: int | None = None
+        self,
+        chunk_idx: int,
+        frozen_anchor_id: int | None = None,
+        identity_recovery_anchor_id: int | None = None,
     ) -> None:
         next_selected = self._next_selected_chunk_ids(chunk_idx)
         keep_after_store = {self.pipeline._kv_cache_memory_id("clean", cid) for cid in next_selected}
@@ -1292,6 +1328,10 @@ class JoyOmniV2VStreamingSession:
 
         if frozen_anchor_id is not None:
             keep_after_store.add(self.pipeline._kv_cache_memory_id("clean", frozen_anchor_id))
+        if identity_recovery_anchor_id is not None:
+            keep_after_store.add(
+                self.pipeline._kv_cache_memory_id("clean", identity_recovery_anchor_id)
+            )
         self.pipeline.transformer.evict_kv_cache_chunks(keep_after_store)
 
     def _finish_chunk_profile(
@@ -1503,13 +1543,36 @@ class JoyOmniV2VStreamingSession:
         chunk_idx = self.chunk_idx
 
         frozen_anchor_id = self._update_static_anchor(chunk_idx, source_frames)
+        recovery = self._identity_recovery.observe_chunk(chunk_idx, source_metas)
+        profile = self._new_profile(chunk_idx, len(source_frames))
+        profile.update({
+            "identity_occlusion_risk": int(recovery.occlusion_risk),
+            "identity_occlusion_risky_frames": recovery.risky_frames,
+            "identity_occlusion_overlap": recovery.max_overlap,
+            "identity_recovery_active": int(recovery.recovery_active),
+            "identity_recovery_anchor": recovery.anchor_chunk_id,
+            "identity_recovery_release": int(recovery.release_after_chunk),
+        })
+        if recovery.event in {"occlusion_started", "recovery_released"}:
+            print(
+                "#####[IDENTITY-RECOVERY] "
+                f"event={recovery.event} chunk={chunk_idx} "
+                f"risk_frames={recovery.risky_frames}/{len(source_metas)} "
+                f"overlap={recovery.max_overlap:.3f} "
+                f"anchor={recovery.anchor_chunk_id}",
+                flush=True,
+            )
         job = _ChunkJob(
             chunk_idx=chunk_idx,
             source_frames=source_frames,
             source_metas=source_metas,
-            profile=self._new_profile(chunk_idx, len(source_frames)),
+            profile=profile,
             total_started=time.perf_counter(),
             frozen_anchor_id=frozen_anchor_id,
+            identity_recovery_anchor_id=recovery.anchor_chunk_id,
+            identity_recovery_active=recovery.recovery_active,
+            identity_recovery_release=recovery.release_after_chunk,
+            identity_occlusion_risk=recovery.occlusion_risk,
             valid_count=valid_count,
         )
         if self.settings.frame_audit is not None:
@@ -1630,10 +1693,16 @@ class JoyOmniV2VStreamingSession:
                             profile=encoded.job.profile,
                             chunk_idx=encoded.job.chunk_idx,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
+                            identity_recovery_anchor_id=(
+                                encoded.job.identity_recovery_anchor_id
+                            ),
                         )
                         self._evict_after_store(
                             encoded.job.chunk_idx,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
+                            identity_recovery_anchor_id=(
+                                encoded.job.identity_recovery_anchor_id
+                            ),
                         )
                         _dit_ready = _record_ready_event()
                 if self.settings.frame_audit is not None:
@@ -1726,6 +1795,12 @@ class JoyOmniV2VStreamingSession:
                         decoded.decoded_pixels,
                         profile=decoded.job.profile,
                         chunk_idx=decoded.job.chunk_idx,
+                        identity_recovery_active=(
+                            decoded.job.identity_recovery_active
+                        ),
+                        identity_recovery_release=(
+                            decoded.job.identity_recovery_release
+                        ),
                     )
                 self._inc_debug_counter("pseudo_encoded_chunks")
             except BaseException as exc:
@@ -2010,6 +2085,8 @@ class JoyOmniV2VStreamingSession:
         *,
         profile: dict[str, Any] | None = None,
         chunk_idx: int,
+        identity_recovery_active: bool = False,
+        identity_recovery_release: bool = False,
     ) -> None:
         pseudo_vae = self.pseudo_encode_vae
         pseudo_device = _module_device(pseudo_vae)
@@ -2027,9 +2104,22 @@ class JoyOmniV2VStreamingSession:
                 pseudo_latent = self._posterior_latent(pseudo_enc.latent_dist)
             else:
                 pseudo_latent = pseudo_enc
+        reuse_safe = (
+            identity_recovery_active
+            and not identity_recovery_release
+            and self._identity_safe_pseudo_latent is not None
+        )
+        if reuse_safe:
+            next_pseudo_latent = self._identity_safe_pseudo_latent.clone()
+        else:
+            next_pseudo_latent = pseudo_latent
+            if not identity_recovery_active or identity_recovery_release:
+                self._identity_safe_pseudo_latent = pseudo_latent.detach().clone()
+        if profile is not None:
+            profile["identity_recovery_safe_pseudo"] = int(reuse_safe)
         self._set_debug_state("postprocess", "store_pseudo_latent", chunk_idx)
-        self._store_decode_pseudo_latent(chunk_idx + 1, pseudo_latent)
-        del prev_pixels, pseudo_enc, pseudo_latent
+        self._store_decode_pseudo_latent(chunk_idx + 1, next_pseudo_latent)
+        del prev_pixels, pseudo_enc, pseudo_latent, next_pseudo_latent
 
     @torch.no_grad()
     def _pack_decoded_pixels(

@@ -1,14 +1,16 @@
 /*
- * Browser-side MediaPipe mouth landmark telemetry.
+ * Browser-side MediaPipe mouth and hand-over-face telemetry.
  *
  * This worker never changes the video frame sent to JoyAI. It emits validated
- * landmark/appearance metadata that diagnostics and the optional bounded
- * runtime mouth control can consume; it never alters model weights or pixels.
+ * landmark/appearance metadata that diagnostics, bounded mouth control, and
+ * identity-history recovery can consume; it never alters model weights or
+ * generated pixels.
  */
 
 import {
   FaceLandmarker,
   FilesetResolver,
+  HandLandmarker,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
 import {
   analyzeMouthAnatomy,
@@ -19,10 +21,21 @@ const WASM_ROOT =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
 const DEFAULT_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const DEFAULT_HAND_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const HAND_DETECTION_INTERVAL_MS = 125;
 
 const LIP_INDICES = Array.from(
   new Set(
     FaceLandmarker.FACE_LANDMARKS_LIPS.flatMap((connection) => [
+      connection.start,
+      connection.end,
+    ]),
+  ),
+).sort((a, b) => a - b);
+const FACE_OVAL_INDICES = Array.from(
+  new Set(
+    FaceLandmarker.FACE_LANDMARKS_FACE_OVAL.flatMap((connection) => [
       connection.start,
       connection.end,
     ]),
@@ -47,7 +60,9 @@ const MOUTH_BLENDSHAPES = new Set([
 ]);
 
 let faceLandmarker = null;
+let handLandmarker = null;
 let delegate = "CPU";
+let handDelegate = null;
 let processing = false;
 let smoothedRoi = null;
 let previousLipPoints = null;
@@ -55,6 +70,9 @@ let previousJawOpen = null;
 let previousAnatomyEvidence = null;
 let anatomyCanvas = null;
 let anatomyContext = null;
+let visionFileset = null;
+let latestHandResult = null;
+let lastHandDetectionMs = -Infinity;
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
@@ -137,14 +155,84 @@ function lipMotion(currentPoints, lipWidth) {
   return total / currentPoints.length / Math.max(lipWidth, 1e-6);
 }
 
+function landmarkRoi(landmarks, indices = null, padX = 0, padY = 0) {
+  const points = (indices ? indices.map((index) => landmarks[index]) : landmarks).filter(Boolean);
+  if (!points.length) return null;
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const x = clamp01(Math.min(...xs) - padX);
+  const y = clamp01(Math.min(...ys) - padY);
+  const right = clamp01(Math.max(...xs) + padX);
+  const bottom = clamp01(Math.max(...ys) + padY);
+  return {
+    x,
+    y,
+    width: Math.max(0, right - x),
+    height: Math.max(0, bottom - y),
+  };
+}
+
+function overlapAreaRatio(face, hand) {
+  if (!face || !hand || face.width <= 0 || face.height <= 0) return 0;
+  const left = Math.max(face.x, hand.x);
+  const top = Math.max(face.y, hand.y);
+  const right = Math.min(face.x + face.width, hand.x + hand.width);
+  const bottom = Math.min(face.y + face.height, hand.y + hand.height);
+  const area = Math.max(0, right - left) * Math.max(0, bottom - top);
+  return area / Math.max(1e-6, face.width * face.height);
+}
+
+function identityOcclusion(faceLandmarks, handResult) {
+  if (!handLandmarker) {
+    return { available: false, risk: false, overlap: 0, handCount: 0 };
+  }
+  const face = landmarkRoi(faceLandmarks, FACE_OVAL_INDICES, 0.012, 0.016);
+  const hands = handResult?.landmarks || [];
+  if (!face) {
+    return { available: true, risk: false, overlap: 0, handCount: hands.length };
+  }
+
+  let maxOverlap = 0;
+  let maxInside = 0;
+  const handRois = [];
+  for (const landmarks of hands) {
+    const hand = landmarkRoi(landmarks, null, 0.008, 0.008);
+    if (!hand) continue;
+    handRois.push(hand);
+    maxOverlap = Math.max(maxOverlap, overlapAreaRatio(face, hand));
+    const inside = landmarks.filter((point) => (
+      point.x >= face.x && point.x <= face.x + face.width
+      && point.y >= face.y && point.y <= face.y + face.height
+    )).length;
+    maxInside = Math.max(maxInside, inside);
+  }
+  const risk = (maxInside >= 2 && maxOverlap >= 0.025) || maxInside >= 4;
+  return {
+    available: true,
+    risk,
+    overlap: Number(maxOverlap.toFixed(6)),
+    landmarksInsideFace: maxInside,
+    handCount: hands.length,
+    faceRoi: face,
+    handRois,
+  };
+}
+
+async function vision() {
+  if (!visionFileset) {
+    visionFileset = await FilesetResolver.forVisionTasks(WASM_ROOT, true);
+  }
+  return visionFileset;
+}
+
 async function createLandmarker(modelUrl, requestedDelegate) {
-  const vision = await FilesetResolver.forVisionTasks(WASM_ROOT, true);
+  const fileset = await vision();
   const modelResponse = await fetch(modelUrl || DEFAULT_MODEL_URL);
   if (!modelResponse.ok) {
     throw new Error(`Failed to load MediaPipe face model: HTTP ${modelResponse.status}`);
   }
   const modelBuffer = await modelResponse.arrayBuffer();
-  return FaceLandmarker.createFromOptions(vision, {
+  return FaceLandmarker.createFromOptions(fileset, {
     baseOptions: {
       modelAssetBuffer: new Uint8Array(modelBuffer),
       delegate: requestedDelegate,
@@ -156,6 +244,26 @@ async function createLandmarker(modelUrl, requestedDelegate) {
     minTrackingConfidence: 0.5,
     outputFaceBlendshapes: true,
     outputFacialTransformationMatrixes: false,
+  });
+}
+
+async function createHandLandmarker(modelUrl, requestedDelegate) {
+  const fileset = await vision();
+  const modelResponse = await fetch(modelUrl || DEFAULT_HAND_MODEL_URL);
+  if (!modelResponse.ok) {
+    throw new Error(`Failed to load MediaPipe hand model: HTTP ${modelResponse.status}`);
+  }
+  const modelBuffer = await modelResponse.arrayBuffer();
+  return HandLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetBuffer: new Uint8Array(modelBuffer),
+      delegate: requestedDelegate,
+    },
+    runningMode: "VIDEO",
+    numHands: 2,
+    minHandDetectionConfidence: 0.5,
+    minHandPresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5,
   });
 }
 
@@ -174,7 +282,34 @@ async function initialize(data) {
     faceLandmarker = await createLandmarker(modelUrl, "CPU");
     delegate = "CPU";
   }
-  self.postMessage({ type: "ready", delegate, lipLandmarkCount: LIP_INDICES.length });
+  const handModelUrl = data.handModelUrl || DEFAULT_HAND_MODEL_URL;
+  try {
+    handLandmarker = await createHandLandmarker(handModelUrl, requested);
+    handDelegate = requested;
+  } catch (error) {
+    try {
+      handLandmarker = await createHandLandmarker(handModelUrl, "CPU");
+      handDelegate = "CPU";
+      self.postMessage({
+        type: "hand_delegate_fallback",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } catch (fallbackError) {
+      handLandmarker = null;
+      handDelegate = null;
+      self.postMessage({
+        type: "hand_unavailable",
+        error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+      });
+    }
+  }
+  self.postMessage({
+    type: "ready",
+    delegate,
+    handDelegate,
+    handReady: Boolean(handLandmarker),
+    lipLandmarkCount: LIP_INDICES.length,
+  });
 }
 
 function resetTracking() {
@@ -182,6 +317,8 @@ function resetTracking() {
   previousLipPoints = null;
   previousJawOpen = null;
   previousAnatomyEvidence = null;
+  latestHandResult = null;
+  lastHandDetectionMs = -Infinity;
 }
 
 function anatomyFrame(bitmap) {
@@ -230,9 +367,24 @@ async function detectFrame(data) {
         delegate,
         inferenceMs: performance.now() - startedAt,
         anatomy: unavailableMouthAnatomy(),
+        occlusion: {
+          available: Boolean(handLandmarker),
+          risk: false,
+          overlap: 0,
+          handCount: 0,
+        },
       });
       return;
     }
+
+    if (
+      handLandmarker
+      && data.timestampMs - lastHandDetectionMs >= HAND_DETECTION_INTERVAL_MS
+    ) {
+      latestHandResult = handLandmarker.detectForVideo(bitmap, data.timestampMs);
+      lastHandDetectionMs = data.timestampMs;
+    }
+    const occlusion = identityOcclusion(landmarks, latestHandResult);
 
     const mouth = mouthRoi(landmarks);
     const blendshapes = blendshapeMap(result);
@@ -284,6 +436,7 @@ async function detectFrame(data) {
       significant,
       anatomy,
       anatomyError,
+      occlusion,
     });
   } catch (error) {
     self.postMessage({
@@ -309,7 +462,9 @@ self.onmessage = async (event) => {
       resetTracking();
     } else if (data.type === "close") {
       faceLandmarker?.close?.();
+      handLandmarker?.close?.();
       faceLandmarker = null;
+      handLandmarker = null;
       resetTracking();
     }
   } catch (error) {

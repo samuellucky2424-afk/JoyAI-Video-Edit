@@ -363,6 +363,30 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertNotIn("ref_video_value_scale", runtime)
         self.assertNotIn("in_ref_value_scale", graph_runner)
 
+    def test_hand_face_occlusion_recovery_reaches_both_causal_histories(self):
+        html = (ROOT / "deploy" / "static" / "index.html").read_text()
+        worker = (
+            ROOT / "deploy" / "static" / "mediapipe-mouth-worker.js"
+        ).read_text()
+        server = (
+            ROOT / "deploy" / "xvideo" / "serving" / "serve_joyomni_streaming.py"
+        ).read_text()
+        runtime = (
+            ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
+        ).read_text()
+
+        self.assertIn("HandLandmarker", worker)
+        self.assertIn("hand_landmarker.task", worker)
+        self.assertIn("identityOcclusion", worker)
+        self.assertIn("identity_occlusion_risk:", html)
+        self.assertIn("identity_occlusion_recovery: identityLock", html)
+        self.assertIn('payload.get("identity_occlusion_risk") is True', server)
+        self.assertIn("identity_occlusion_recovery=identity_occlusion_recovery", server)
+        self.assertIn("IdentityRecoveryController", runtime)
+        self.assertIn("identity_recovery_anchor_id", runtime)
+        self.assertIn("self._identity_safe_pseudo_latent", runtime)
+        self.assertIn("#####[IDENTITY-RECOVERY]", runtime)
+
     def test_vae_posterior_mode_is_selectable_per_session(self):
         html = (ROOT / "deploy" / "static" / "index.html").read_text()
         server = (
