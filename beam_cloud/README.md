@@ -51,7 +51,8 @@ python -m beam run beam_cloud/app.py:model_download
 
 This CPU-only job creates `joyai-models-v1`, downloads pinned revisions, fully
 hashes the 32.5 GB DiT, and writes `beam_models_ready.json` only after every
-required file is valid. Rerunning the command is safe and resumes cached files.
+required file is valid. It stays alive until the downloader finishes, then exits
+normally. Rerunning the command is safe and resumes cached files.
 
 ## 3. Reserve the validated GPU only when ready to test
 

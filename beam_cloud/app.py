@@ -41,7 +41,10 @@ model_download = Pod(
     image=download_image,
     volumes=[model_volume],
     env=DOWNLOAD_ENV,
-    keep_warm_seconds=0,
+    # This Pod has no HTTP connection to keep it "active" while it downloads.
+    # Zero lets Beam's scheduler stop it immediately (exit code 558). Keep it
+    # alive until the downloader process exits normally after verification.
+    keep_warm_seconds=-1,
     authorized=True,
 )
 

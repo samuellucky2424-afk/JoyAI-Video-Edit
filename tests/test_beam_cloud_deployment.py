@@ -121,6 +121,26 @@ class BeamCloudDeploymentTests(unittest.TestCase):
         self.assertIn(r"beam_cloud\app.py:joyai", readme)
         self.assertIn("beam_cloud/app.py:joyai", readme)
 
+    def test_model_download_pod_cannot_be_stopped_as_immediately_idle(self):
+        source = (REPOSITORY_ROOT / "beam_cloud/app.py").read_text()
+        tree = ast.parse(source)
+        assignment = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "model_download"
+                for target in node.targets
+            )
+        )
+        self.assertIsInstance(assignment.value, ast.Call)
+        keyword = next(
+            item
+            for item in assignment.value.keywords
+            if item.arg == "keep_warm_seconds"
+        )
+        self.assertEqual(ast.literal_eval(keyword.value), -1)
+
 
 if __name__ == "__main__":
     unittest.main()
