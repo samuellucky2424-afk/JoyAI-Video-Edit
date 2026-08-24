@@ -5,6 +5,7 @@ on:
     branches:
       - vast-ai-serverless-rtx-pro-6000
       - vast-mouth-control-v1
+      - beam-occlusion-recovery-v1
     paths:
       - Dockerfile.vast
       - deploy/**
