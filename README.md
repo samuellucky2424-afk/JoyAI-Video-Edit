@@ -121,6 +121,14 @@ http://localhost:8080
 
 For remote machines, bind the server to `0.0.0.0` and open the selected port, or use SSH port forwarding.
 
+### Beam.cloud
+
+The project-specific live deployment uses a Beam on-demand RTX PRO 6000 with
+an immutable container digest and a persistent, verified model volume. Follow
+[`beam_cloud/README.md`](beam_cloud/README.md) for the cost-safe download,
+launch, health-check, and shutdown sequence. The Beam deployment preserves the
+released 0811 checkpoint and does not rebuild or modify the model weights.
+
 ## 📚 Citation
 
 If JoyAI-Video-Edit is useful for your research or product prototype, please cite:
