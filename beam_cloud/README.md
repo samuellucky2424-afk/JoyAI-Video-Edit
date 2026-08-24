@@ -9,8 +9,8 @@ retrain, quantize, replace, or write to the original JoyAI checkpoint.
 | Setting | Value |
 |---|---|
 | GPU | Beam on-demand RTX PRO 6000, 96 GB |
-| Container | `sha256:9259ffe9fd27f462149708a0d5cf090070297c0acc312f287e1f52bbdb1c2b49` |
-| Image source commit | `51eebc611e2d65d82ab4fc7c12b27bb21d193722` |
+| Container | `sha256:a18a738d656daba513ff744bb670aef02be45549486be58bd9ee773b4fbe790b` |
+| Image source commit | `5bea2f6ba296fe34fdfaaa4da1497e3de19d4008` |
 | JoyAI release | `eda14f342ef99c52485bbb8dc271c29b42298089` |
 | DiT SHA256 | `b3904b6fda53d13b230918bb616f322d12cfb2337b0e8d9dc203cdabc36605ba` |
 | Resolution / FPS | 840x480 at 24 FPS |
