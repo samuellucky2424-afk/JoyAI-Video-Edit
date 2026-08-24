@@ -6,13 +6,13 @@ from pathlib import PurePosixPath
 APP_NAME = "joyai-video-edit"
 MODEL_DOWNLOAD_APP_NAME = "joyai-model-download"
 
-# This digest was published from repository commit 51eebc611e2d65d82ab4fc7c12b27bb21d193722.
-# It contains the bounded mouth control, identity-safe conditioning, and uplink body-detail fix.
+# This digest was published from repository commit 5bea2f6ba296fe34fdfaaa4da1497e3de19d4008.
+# It adds bounded face-occlusion recovery without modifying the validated checkpoint.
 IMAGE_URI = (
     "ghcr.io/samuellucky2424-afk/joyai-video-edit@"
-    "sha256:9259ffe9fd27f462149708a0d5cf090070297c0acc312f287e1f52bbdb1c2b49"
+    "sha256:a18a738d656daba513ff744bb670aef02be45549486be58bd9ee773b4fbe790b"
 )
-IMAGE_REVISION = "51eebc611e2d65d82ab4fc7c12b27bb21d193722"
+IMAGE_REVISION = "5bea2f6ba296fe34fdfaaa4da1497e3de19d4008"
 
 GPU_TYPE = "RTXPro6000"
 GPU_POOL = "joyai-rtx-pro-6000"

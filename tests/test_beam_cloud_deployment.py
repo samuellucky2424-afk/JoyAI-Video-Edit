@@ -30,11 +30,11 @@ class BeamCloudDeploymentTests(unittest.TestCase):
         self.assertEqual(
             self.config.IMAGE_URI,
             "ghcr.io/samuellucky2424-afk/joyai-video-edit@"
-            "sha256:9259ffe9fd27f462149708a0d5cf090070297c0acc312f287e1f52bbdb1c2b49",
+            "sha256:a18a738d656daba513ff744bb670aef02be45549486be58bd9ee773b4fbe790b",
         )
         self.assertEqual(
             self.config.IMAGE_REVISION,
-            "51eebc611e2d65d82ab4fc7c12b27bb21d193722",
+            "5bea2f6ba296fe34fdfaaa4da1497e3de19d4008",
         )
         self.assertNotIn(":latest", self.config.IMAGE_URI)
 
