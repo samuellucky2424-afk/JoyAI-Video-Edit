@@ -56,7 +56,9 @@ joyai = Pod(
     entrypoint=joyai_entrypoint(),
     ports=[PORT],
     cpu=8,
-    memory="96Gi",
+    # Beam currently accepts at most 64 GiB of Pod system RAM. Model weights
+    # remain on the RTX PRO 6000's 96 GB VRAM; this does not alter the model.
+    memory="64Gi",
     gpu=GpuType.RTXPro6000,
     gpu_count=1,
     image=Image.from_registry(IMAGE_URI),

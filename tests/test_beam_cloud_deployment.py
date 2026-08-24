@@ -141,6 +141,24 @@ class BeamCloudDeploymentTests(unittest.TestCase):
         )
         self.assertEqual(ast.literal_eval(keyword.value), -1)
 
+    def test_runtime_pod_respects_beam_system_memory_limit(self):
+        source = (REPOSITORY_ROOT / "beam_cloud/app.py").read_text()
+        tree = ast.parse(source)
+        assignment = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "joyai"
+                for target in node.targets
+            )
+        )
+        self.assertIsInstance(assignment.value, ast.Call)
+        keyword = next(
+            item for item in assignment.value.keywords if item.arg == "memory"
+        )
+        self.assertEqual(ast.literal_eval(keyword.value), "64Gi")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ retrain, quantize, replace, or write to the original JoyAI checkpoint.
 | Setting | Value |
 |---|---|
 | GPU | Beam on-demand RTX PRO 6000, 96 GB |
+| Pod system RAM | 64 GiB |
 | Container | `sha256:a18a738d656daba513ff744bb670aef02be45549486be58bd9ee773b4fbe790b` |
 | Image source commit | `5bea2f6ba296fe34fdfaaa4da1497e3de19d4008` |
 | JoyAI release | `eda14f342ef99c52485bbb8dc271c29b42298089` |
