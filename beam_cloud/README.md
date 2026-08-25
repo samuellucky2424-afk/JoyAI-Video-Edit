@@ -10,11 +10,12 @@ retrain, quantize, replace, or write to the original JoyAI checkpoint.
 |---|---|
 | GPU | Beam on-demand RTX PRO 6000, 96 GB |
 | Pod system RAM | 64 GiB |
-| Container | `sha256:a18a738d656daba513ff744bb670aef02be45549486be58bd9ee773b4fbe790b` |
-| Image source commit | `5bea2f6ba296fe34fdfaaa4da1497e3de19d4008` |
+| Container | `sha256:91d93e9608687c08a22e8d0bda7383ee104a97422d1fdfa7604f9f3196b1faf4` |
+| Image source commit | `84838a0e6b8cb5a814e73a412ba7a605ddde1cb1` |
 | JoyAI release | `eda14f342ef99c52485bbb8dc271c29b42298089` |
 | DiT SHA256 | `b3904b6fda53d13b230918bb616f322d12cfb2337b0e8d9dc203cdabc36605ba` |
 | Resolution / FPS | 840x480 at 24 FPS |
+| Mouth latent control | Enabled for validation; hard-capped at 1.125x |
 | Port | 8080 |
 | Persistent volume | `joyai-models-v1` at `/workspace/joyai` |
 
