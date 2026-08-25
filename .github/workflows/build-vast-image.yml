@@ -12,6 +12,9 @@ on:
       - Dockerfile.vast
       - deploy/**
       - vast/**
+      - tests/test_mouth_latent_control.py
+      - tests/test_face_value_control.py
+      - tests/test_mouth_inference_contract.py
       - .github/workflows/build-vast-image.yml
   workflow_dispatch:
 
