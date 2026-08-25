@@ -678,6 +678,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "pe_available": bool(os.environ.get("OPENAI_API_KEY")),
             "max_temporal_ids": args.max_temporal_ids,
             "mouth_control": args.mouth_control,
+            "mouth_latent_control": args.mouth_latent_control,
             "mouth_control_gain": args.mouth_control_gain,
             "record_enabled": args.record_dir is not None,
         }
@@ -1523,6 +1524,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         )
                         if not mouth_control_enabled:
                             mouth_control_gain = 1.0
+                        mouth_latent_control_enabled = bool(
+                            payload.get(
+                                "mouth_latent_control",
+                                args.mouth_latent_control,
+                            )
+                        ) and mouth_control_enabled
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
                         # The reference KV is the long-lived identity anchor.
                         # Resetting the entire session drops both the generated
@@ -1679,6 +1686,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             stabilize_identity_exposure=identity_lock,
                             vae_posterior_mode=vae_posterior_mode,
                             mouth_control_enabled=mouth_control_enabled,
+                            mouth_latent_control_enabled=(
+                                mouth_latent_control_enabled
+                            ),
                             mouth_control_gain=mouth_control_gain,
                             identity_occlusion_recovery=identity_occlusion_recovery,
                             identity_recovery_clean_chunks=(
@@ -1698,6 +1708,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "reference_kv_scale": reference_kv_scale,
                             "vae_posterior_mode": session_settings.vae_posterior_mode,
                             "mouth_control": session_settings.mouth_control_enabled,
+                            "mouth_latent_control": (
+                                session_settings.mouth_latent_control_enabled
+                            ),
                             "mouth_control_gain": session_settings.mouth_control_gain,
                             "identity_occlusion_recovery": (
                                 session_settings.identity_occlusion_recovery
@@ -1730,6 +1743,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ws_debug["identity_lock"] = identity_lock
                         ws_debug["reference_kv_scale"] = reference_kv_scale
                         ws_debug["mouth_control"] = session_settings.mouth_control_enabled
+                        ws_debug["mouth_latent_control"] = (
+                            session_settings.mouth_latent_control_enabled
+                        )
                         ws_debug["mouth_control_gain"] = session_settings.mouth_control_gain
                         ws_debug["session_config"] = session_config
                         ws_debug["last_message_type"] = "start"
@@ -1747,6 +1763,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "vae_posterior_mode": session_settings.vae_posterior_mode,
                                 "num_inference_steps": session_settings.num_inference_steps,
                                 "mouth_control": session_settings.mouth_control_enabled,
+                                "mouth_latent_control": (
+                                    session_settings.mouth_latent_control_enabled
+                                ),
                                 "mouth_control_gain": session_settings.mouth_control_gain,
                                 "frame_audit": True,
                                 "kv_reset_frames": kv_reset_frames,
@@ -2370,13 +2389,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--mouth-control",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable bounded MediaPipe ROI control for reference-person sessions.",
+        help="Enable validated MediaPipe mouth ROI metadata and source-crop preservation.",
+    )
+    parser.add_argument(
+        "--mouth-latent-control",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Experimentally emphasize the validated mouth ROI in the existing "
+            "source conditioning latent. Disabled by default; does not alter weights."
+        ),
     )
     parser.add_argument(
         "--mouth-control-gain",
         type=float,
         default=1.35,
-        help="Maximum dynamic source-mouth attention value gain (clamped to 1.0-1.5).",
+        help="Maximum mouth control gain (clamped to 1.0-1.5; latent stage is capped lower).",
     )
     parser.add_argument("--pe-model", type=str, default=None)
     parser.add_argument("--pe-timeout-s", type=float, default=20.0, help="Hard wall-clock cap for deferred prompt-enhancement. On timeout the session degrades to the RAW prompt and starts editing, so a slow/hung PE endpoint (bad network / provider stall) can never wedge the client in the prompt-enhancement state.")

@@ -27,6 +27,7 @@ from xvideo.serving.mouth_control import (
     MOUTH_CONTROL_MAX_GAIN,
     MOUTH_CONTROL_MIN_GAIN,
 )
+from xvideo.serving.mouth_latent_control import apply_mouth_latent_control
 from xvideo.utils import _dynamic_resize_from_bucket, seed_everything
 
 DEFAULT_REFERENCE_IMG_IV2V_BASESIZE = 768
@@ -109,6 +110,7 @@ class StreamingSettings:
     identity_exposure_min_gain: float = 0.68
     vae_posterior_mode: str = "sample"
     mouth_control_enabled: bool = False
+    mouth_latent_control_enabled: bool = False
     mouth_control_gain: float = 1.35
     identity_occlusion_recovery: bool = False
     identity_recovery_clean_chunks: int = 2
@@ -1649,6 +1651,13 @@ class JoyOmniV2VStreamingSession:
                         job.source_frames,
                         profile=job.profile,
                         chunk_idx=job.chunk_idx,
+                    )
+                    ref_chunk_latent = apply_mouth_latent_control(
+                        ref_chunk_latent,
+                        job.source_metas,
+                        enabled=self.settings.mouth_latent_control_enabled,
+                        max_gain=self.settings.mouth_control_gain,
+                        profile=job.profile,
                     )
                     ready = _record_ready_event()
                 if self.settings.frame_audit is not None:

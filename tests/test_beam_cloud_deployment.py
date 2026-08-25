@@ -48,6 +48,7 @@ class BeamCloudDeploymentTests(unittest.TestCase):
         self.assertEqual(env["JOYOMNI_NUM_INFERENCE_STEPS"], "2")
         self.assertEqual(env["JOYOMNI_FP8_IMG"], "1")
         self.assertEqual(env["JOYOMNI_FP8_TXT"], "1")
+        self.assertEqual(env["JOYOMNI_MOUTH_LATENT_CONTROL"], "1")
 
     def test_model_revisions_and_dit_digest_are_pinned(self):
         self.assertEqual(

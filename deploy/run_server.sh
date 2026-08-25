@@ -50,6 +50,7 @@ export JOYOMNI_FP8_FAST_ACCUM="${JOYOMNI_FP8_FAST_ACCUM:-0}"
 RECORD_DIR="${JOYOMNI_RECORD_DIR:-$HERE/recordings}"
 RECORD_ENABLED="${JOYOMNI_RECORD_ENABLED:-1}"
 ONLINE_GATE_ENABLED="${JOYOMNI_ONLINE_GATE_ENABLED:-1}"
+MOUTH_LATENT_CONTROL_ENABLED="${JOYOMNI_MOUTH_LATENT_CONTROL:-0}"
 EXTRA_ARGS=()
 
 case "${RECORD_ENABLED,,}" in
@@ -72,6 +73,19 @@ case "${ONLINE_GATE_ENABLED,,}" in
     ;;
   *)
     echo "JOYOMNI_ONLINE_GATE_ENABLED must be one of: 1, 0, true, false, yes, no, on, off" >&2
+    exit 2
+    ;;
+esac
+
+case "${MOUTH_LATENT_CONTROL_ENABLED,,}" in
+  1|true|yes|on)
+    EXTRA_ARGS+=(--mouth-latent-control)
+    ;;
+  0|false|no|off)
+    EXTRA_ARGS+=(--no-mouth-latent-control)
+    ;;
+  *)
+    echo "JOYOMNI_MOUTH_LATENT_CONTROL must be one of: 1, 0, true, false, yes, no, on, off" >&2
     exit 2
     ;;
 esac

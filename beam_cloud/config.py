@@ -56,6 +56,9 @@ RUNTIME_ENV = {
     "JOYOMNI_WARMUP_REFERENCE_BUCKETS": "1",
     "JOYOMNI_RECORD_ENABLED": "0",
     "JOYOMNI_ONLINE_GATE_ENABLED": "0",
+    # The server default remains off. This isolated Beam validation branch
+    # enables the bounded same-shape latent experiment for the next live test.
+    "JOYOMNI_MOUTH_LATENT_CONTROL": "1",
 }
 
 DOWNLOAD_ENV = {
