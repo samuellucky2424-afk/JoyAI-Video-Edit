@@ -350,6 +350,9 @@ class RunPodConnectionContractTests(unittest.TestCase):
         latent_control = (
             ROOT / "deploy" / "xvideo" / "serving" / "mouth_latent_control.py"
         ).read_text()
+        face_value_control = (
+            ROOT / "deploy" / "xvideo" / "serving" / "face_value_control.py"
+        ).read_text()
 
         self.assertIn('id="mouthControl"', html)
         self.assertIn('id="mouthControlGain"', html)
@@ -368,13 +371,18 @@ class RunPodConnectionContractTests(unittest.TestCase):
         self.assertIn("applied_to_ref_video_latent", latent_control)
         self.assertIn("MOUTH_LATENT_MAX_GAIN = 1.125", latent_control)
         self.assertIn('"mouth_patch": payload.get("mouth_patch")', server)
-        self.assertNotIn("ref_video_value_scale", runtime)
-        self.assertNotIn("in_ref_value_scale", graph_runner)
+        self.assertIn("face_value_control_enabled: bool = False", runtime)
+        self.assertIn("build_face_value_scale(", runtime)
+        self.assertIn("ref_video_value_scale", runtime)
+        self.assertIn("in_ref_value_scale", graph_runner)
+        self.assertIn("MOUTH_VALUE_MAX_GAIN = 1.125", face_value_control)
+        self.assertIn("EYE_VALUE_MAX_GAIN = 1.075", face_value_control)
 
     def test_container_build_executes_mouth_tensor_contract(self):
         dockerfile = (ROOT / "Dockerfile.vast").read_text()
 
         self.assertIn("tests.test_mouth_latent_control", dockerfile)
+        self.assertIn("tests.test_face_value_control", dockerfile)
         self.assertIn("tests.test_mouth_inference_contract", dockerfile)
 
     def test_hand_face_occlusion_recovery_reaches_both_causal_histories(self):

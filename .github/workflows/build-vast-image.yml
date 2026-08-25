@@ -7,6 +7,7 @@ on:
       - vast-mouth-control-v1
       - beam-occlusion-recovery-v1
       - beam-mouth-latent-control-v1
+      - beam-face-expression-values-v1
     paths:
       - Dockerfile.vast
       - deploy/**

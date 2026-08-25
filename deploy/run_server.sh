@@ -51,6 +51,7 @@ RECORD_DIR="${JOYOMNI_RECORD_DIR:-$HERE/recordings}"
 RECORD_ENABLED="${JOYOMNI_RECORD_ENABLED:-1}"
 ONLINE_GATE_ENABLED="${JOYOMNI_ONLINE_GATE_ENABLED:-1}"
 MOUTH_LATENT_CONTROL_ENABLED="${JOYOMNI_MOUTH_LATENT_CONTROL:-0}"
+FACE_VALUE_CONTROL_ENABLED="${JOYOMNI_FACE_VALUE_CONTROL:-0}"
 EXTRA_ARGS=()
 
 case "${RECORD_ENABLED,,}" in
@@ -86,6 +87,19 @@ case "${MOUTH_LATENT_CONTROL_ENABLED,,}" in
     ;;
   *)
     echo "JOYOMNI_MOUTH_LATENT_CONTROL must be one of: 1, 0, true, false, yes, no, on, off" >&2
+    exit 2
+    ;;
+esac
+
+case "${FACE_VALUE_CONTROL_ENABLED,,}" in
+  1|true|yes|on)
+    EXTRA_ARGS+=(--face-value-control)
+    ;;
+  0|false|no|off)
+    EXTRA_ARGS+=(--no-face-value-control)
+    ;;
+  *)
+    echo "JOYOMNI_FACE_VALUE_CONTROL must be one of: 1, 0, true, false, yes, no, on, off" >&2
     exit 2
     ;;
 esac

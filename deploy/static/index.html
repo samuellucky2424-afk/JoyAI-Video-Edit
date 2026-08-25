@@ -218,8 +218,8 @@
   <div class="cmd-foot minimal">
     <label id="peToggle" class="pe-toggle keep-min"><input id="usePe" type="checkbox" checked style="width:auto" /> <span data-i18n="pe_toggle">提示词增强</span></label>
     <label id="identityLockToggle" class="pe-toggle keep-min"><input id="identityLock" type="checkbox" checked disabled style="width:auto" /> <span data-i18n="identity_lock">身份锁定</span></label>
-    <label id="mouthControlToggle" class="pe-toggle keep-min"><input id="mouthControl" type="checkbox" checked disabled style="width:auto" /> <span data-i18n="mouth_control">嘴部细节控制</span></label>
-    <span id="mouthControlGainWrap" class="kvreset-field keep-min"><span data-i18n="mouth_gain">嘴部增益</span><input id="mouthControlGain" type="number" value="1.35" min="1" max="1.5" step="0.05" disabled /></span>
+    <label id="mouthControlToggle" class="pe-toggle keep-min"><input id="mouthControl" type="checkbox" checked disabled style="width:auto" /> <span data-i18n="mouth_control">眼睛与嘴部细节</span></label>
+    <span id="mouthControlGainWrap" class="kvreset-field keep-min"><span data-i18n="mouth_gain">细节增益</span><input id="mouthControlGain" type="number" value="1.35" min="1" max="1.5" step="0.05" disabled /></span>
     <label id="gateToggle" class="pe-toggle keep-min"><input id="dbgGateEnabled" type="checkbox" checked style="width:auto" /> <span data-i18n="gate_toggle">人物在场检测</span></label>
     <label id="profToggle" class="pe-toggle keep-min"><input id="profileTimings" type="checkbox" style="width:auto" /> <span data-i18n="prof_toggle">性能分析</span></label>
     <span class="kvreset-field keep-min">
@@ -319,8 +319,8 @@ const I18N = {
     fps_label: "发/收/显",
     pe_toggle: "提示词增强",
     identity_lock: "身份锁定",
-    mouth_control: "嘴部细节控制",
-    mouth_gain: "嘴部增益",
+    mouth_control: "眼睛与嘴部细节",
+    mouth_gain: "细节增益",
     gate_toggle: "人物在场检测",
     prof_toggle: "性能分析",
     upload_quality: "上传清晰度",
@@ -349,7 +349,7 @@ const I18N = {
     stage_q_enc: "排队·编码", stage_q_dit: "排队·DiT", stage_q_dec: "排队·解码",
     stage_q_pseudo: "排队·伪编码", stage_q_post: "排队·后处理",
     stage_ws: "WS 发送", stage_total: "服务端合计", stage_residence: "服务端驻留",
-    stage_enc_q: "编码队列", stage_ws_buf: "发送缓冲", stage_recv_q: "接收队列", stage_mouth: "嘴部控制",
+    stage_enc_q: "编码队列", stage_ws_buf: "发送缓冲", stage_recv_q: "接收队列", stage_mouth: "面部细节控制",
     busy_released: "已释放", busy_disconnected: "已断开", busy_conn_err: "连接错误",
     pe_fallback: " 回退", pe_error: " 错误",
     reset_count_changed: "检测到人数变化，重新编辑",
@@ -383,8 +383,8 @@ const I18N = {
     fps_label: "out/in/disp",
     pe_toggle: "Prompt Enhance",
     identity_lock: "Identity Lock",
-    mouth_control: "Mouth Detail",
-    mouth_gain: "Mouth gain",
+    mouth_control: "Eye + Mouth Detail",
+    mouth_gain: "Detail gain",
     gate_toggle: "Presence Gate",
     prof_toggle: "Profiling",
     upload_quality: "Upload quality",
@@ -413,7 +413,7 @@ const I18N = {
     stage_q_enc: "Queue·encode", stage_q_dit: "Queue·DiT", stage_q_dec: "Queue·decode",
     stage_q_pseudo: "Queue·pseudo", stage_q_post: "Queue·post",
     stage_ws: "WS send", stage_total: "Server total", stage_residence: "Server residence",
-    stage_enc_q: "Encode queue", stage_ws_buf: "Send buffer", stage_recv_q: "Recv queue", stage_mouth: "Mouth control",
+    stage_enc_q: "Encode queue", stage_ws_buf: "Send buffer", stage_recv_q: "Recv queue", stage_mouth: "Face detail control",
     busy_released: "Released", busy_disconnected: "Disconnected", busy_conn_err: "Connection error",
     pe_fallback: " fallback", pe_error: " error",
     reset_count_changed: "Person count changed, re-editing",
@@ -753,6 +753,8 @@ function sendMouthAudit(result) {
       roi: result.roi || null,
       geometry: result.geometry || null,
       blendshapes: result.blendshapes || null,
+      eye_rois: result.eyeRois || null,
+      eye_blendshapes: result.eyeBlendshapes || null,
       anatomy: result.anatomy || null,
       occlusion: result.occlusion || null,
       significant: Boolean(result.significant),
@@ -861,6 +863,9 @@ function mouthTrackerFrameMeta(nowMs) {
     mouth_roi: available ? (result.roi || null) : null,
     mouth_geometry: available ? (result.geometry || null) : null,
     mouth_blendshapes: available ? (result.blendshapes || null) : null,
+    eye_landmark_available: available && Boolean(result.eyeRois),
+    eye_rois: available ? (result.eyeRois || null) : null,
+    eye_blendshapes: available ? (result.eyeBlendshapes || null) : null,
     mouth_anatomy: available ? (result.anatomy || null) : null,
     mouth_event_significant: available ? Boolean(result.significant) : false,
     mouth_event_camera_frame_seq: available && result.significant ? result.cameraFrameSeq : null,
@@ -1222,7 +1227,27 @@ function renderStageTimings() {
   cards.push(statCell(t("stage_ws_buf"), (_wsBuf / 1024).toFixed(0) + " KB", _wsBuf > 131072 ? "warn" : ""));
   const _recvQ = (typeof outputFrameQueue !== "undefined" && outputFrameQueue) ? outputFrameQueue.length : 0;
   cards.push(statCell(t("stage_recv_q"), _recvQ + " · " + (outCodecH264 ? "h264" : "mjpeg"), _recvQ >= 16 ? "warn" : ""));
-  if (p.mouth_patch_applied !== undefined || p.mouth_control_active !== undefined) {
+  if (p.face_value_control_applied !== undefined) {
+    const faceActive = Number(p.face_value_control_applied) === 1;
+    const regions = Array.isArray(p.face_value_control_regions)
+      ? p.face_value_control_regions
+      : [];
+    const gains = regions
+      .map((region) => Number(region && region.gain))
+      .filter((gain) => Number.isFinite(gain));
+    const maxGain = gains.length ? Math.max(...gains) : null;
+    const regionNames = regions
+      .map((region) => String((region && region.name) || ""))
+      .filter(Boolean)
+      .join("+");
+    const faceReason = String(
+      p.face_value_control_reason || (faceActive ? "active" : "inactive")
+    );
+    const faceValue = faceActive
+      ? `${maxGain ? maxGain.toFixed(3) + "x · " : ""}${regionNames || faceReason}`
+      : `off · ${faceReason}`;
+    cards.push(statCell(t("stage_mouth"), faceValue, faceActive ? "accent" : ""));
+  } else if (p.mouth_patch_applied !== undefined || p.mouth_control_active !== undefined) {
     const mouthActive = Number(p.mouth_patch_applied) === 1;
     const mouthGain = Number(p.mouth_control_gain);
     const mouthReason = String(
@@ -1950,6 +1975,7 @@ async function beginSession() {
   const usePe = !peSuppressed && document.getElementById("usePe").checked;
   const identityLock = !!refImage && document.getElementById("identityLock").checked;
   const mouthControl = identityLock && document.getElementById("mouthControl").checked;
+  const faceValueControl = mouthControl && Boolean(SERVER_DEFAULTS.face_value_control);
   identityFidelityMode = identityLock;
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
@@ -1988,6 +2014,7 @@ async function beginSession() {
     identity_occlusion_recovery: identityLock,
     identity_recovery_clean_chunks: 2,
     mouth_control: mouthControl,
+    face_value_control: faceValueControl,
     mouth_control_gain: Number(document.getElementById("mouthControlGain").value) || 1.35,
     // The official RV2V anchor alone can copy appearance while underweighting
     // facial identity for difficult source/reference pairs. Use the established

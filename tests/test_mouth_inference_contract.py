@@ -11,6 +11,9 @@ STREAMING_PATH = ROOT / "deploy" / "xvideo" / "serving" / "joyomni_streaming.py"
 LATENT_CONTROL_PATH = (
     ROOT / "deploy" / "xvideo" / "serving" / "mouth_latent_control.py"
 )
+FACE_VALUE_CONTROL_PATH = (
+    ROOT / "deploy" / "xvideo" / "serving" / "face_value_control.py"
+)
 SERVER_LAUNCHER_PATH = ROOT / "deploy" / "run_server.sh"
 
 
@@ -38,7 +41,8 @@ class MouthInferenceContractTests(unittest.TestCase):
             "the high-quality source crop must be merged before VAE inference",
         )
 
-    def test_mouth_control_does_not_modify_transformer_attention_values(self) -> None:
+    def test_face_metadata_reaches_edit_condition_attention_values(self) -> None:
+        """Require regional source-value control without touching identity KV."""
         streaming = STREAMING_PATH.read_text(encoding="utf-8")
         graph_runner = (
             ROOT / "deploy" / "xvideo" / "serving" / "graph_runner.py"
@@ -47,11 +51,48 @@ class MouthInferenceContractTests(unittest.TestCase):
             ROOT / "deploy" / "xvideo" / "models" / "dit" / "dit.py"
         ).read_text(encoding="utf-8")
 
-        self.assertNotIn("_mouth_ref_video_value_scale", streaming)
-        self.assertNotIn("ref_video_value_scale", streaming)
-        self.assertNotIn("in_ref_value_scale", graph_runner)
-        self.assertNotIn("ref_video_value_scale", dit)
-        self.assertNotIn("img_value_scale", dit)
+        self.assertTrue(
+            FACE_VALUE_CONTROL_PATH.exists(),
+            "eye/mouth metadata still stops before attention values",
+        )
+        self.assertIn("face_value_control_enabled: bool = False", streaming)
+        self.assertIn("build_face_value_scale(", streaming)
+        self.assertIn("ref_video_value_scale=ref_video_value_scale", streaming)
+        self.assertIn("in_ref_value_scale", graph_runner)
+        self.assertIn("ref_video_value_scale=self.in_ref_value_scale", graph_runner)
+        self.assertIn("runner.in_ref_value_scale.fill_(1.0)", streaming)
+        self.assertIn("ref_video_value_scale: Optional[torch.Tensor] = None", dit)
+        self.assertIn("img_value_scale=visual_value_scale", dit)
+        self.assertIn("img_v = img_v * img_value_scale", dit)
+
+        # The uploaded reference image remains the unmodified identity anchor.
+        self.assertNotIn(
+            "ref_video_value_scale=",
+            streaming[
+                streaming.index("def _encode_ref_image_latent"):
+                streaming.index("def _chunk_last_frame_gray")
+            ],
+        )
+
+    def test_eye_and_anatomy_metadata_cross_the_browser_server_contract(self) -> None:
+        worker = (
+            ROOT / "deploy" / "static" / "mediapipe-mouth-worker.js"
+        ).read_text(encoding="utf-8")
+        html = HTML_PATH.read_text(encoding="utf-8")
+        server = SERVER_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("const EYE_BLENDSHAPES", worker)
+        self.assertIn("function eyeRois(", worker)
+        self.assertIn("eyeBlendshapes", worker)
+        self.assertIn("eyeRois", worker)
+        self.assertIn("eye_rois:", html)
+        self.assertIn("eye_blendshapes:", html)
+        self.assertIn("face_value_control: faceValueControl", html)
+        self.assertIn('"eye_rois": payload.get("eye_rois")', server)
+        self.assertIn(
+            '"eye_blendshapes": payload.get("eye_blendshapes")',
+            server,
+        )
 
     def test_mouth_metadata_reaches_dit_source_conditioning_latent(self) -> None:
         """Require bounded ROI control after VAE encode and before DiT inference."""
@@ -88,6 +129,9 @@ class MouthInferenceContractTests(unittest.TestCase):
         self.assertIn('"--mouth-latent-control"', server)
         self.assertIn("JOYOMNI_MOUTH_LATENT_CONTROL", launcher)
         self.assertIn("EXTRA_ARGS+=(--mouth-latent-control)", launcher)
+        self.assertIn('"--face-value-control"', server)
+        self.assertIn("JOYOMNI_FACE_VALUE_CONTROL", launcher)
+        self.assertIn("EXTRA_ARGS+=(--face-value-control)", launcher)
 
 
 if __name__ == "__main__":

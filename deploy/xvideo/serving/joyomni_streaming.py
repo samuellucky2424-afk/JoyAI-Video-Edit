@@ -21,6 +21,7 @@ from xvideo.models.pipeline import (
     PRECISION_TO_TYPE,
 )
 from xvideo.serving.frame_audit import FrameAudit
+from xvideo.serving.face_value_control import build_face_value_scale
 from xvideo.serving.graph_runner import GRAPH_WINDOW_CHUNKS, StreamingGraphRunner, graph_env_enabled
 from xvideo.serving.identity_recovery import IdentityRecoveryController
 from xvideo.serving.mouth_control import (
@@ -111,6 +112,7 @@ class StreamingSettings:
     vae_posterior_mode: str = "sample"
     mouth_control_enabled: bool = False
     mouth_latent_control_enabled: bool = False
+    face_value_control_enabled: bool = False
     mouth_control_gain: float = 1.35
     identity_occlusion_recovery: bool = False
     identity_recovery_clean_chunks: int = 2
@@ -142,6 +144,7 @@ class _ChunkJob:
 class _EncodedChunk:
     job: _ChunkJob
     ref_chunk_latent: torch.Tensor
+    ref_video_value_scale: torch.Tensor | None = None
     ready_event: torch.cuda.Event | None = None
 
 @dataclass
@@ -1103,6 +1106,7 @@ class JoyOmniV2VStreamingSession:
         runner,
         ref_chunk_latent: torch.Tensor,
         current_chunk_latents: torch.Tensor,
+        ref_video_value_scale: torch.Tensor | None,
         *,
         profile: dict[str, Any],
         history_chunk_ids: list[int],
@@ -1110,6 +1114,17 @@ class JoyOmniV2VStreamingSession:
     ) -> torch.Tensor:
         profile["graph_path"] = 1
         runner.in_ref_latent.copy_(ref_chunk_latent.to(self.target_dtype))
+        if ref_video_value_scale is None:
+            # The graph buffer is persistent.  Reset it explicitly so a
+            # neutral chunk cannot inherit the preceding face-region scale.
+            runner.in_ref_value_scale.fill_(1.0)
+        else:
+            runner.in_ref_value_scale.copy_(
+                ref_video_value_scale.to(
+                    device=self.device,
+                    dtype=self.target_dtype,
+                )
+            )
         started = self._timer_start(self.device)
         runner.in_noise.copy_(current_chunk_latents.to(self.target_dtype))
         runner.full_graph.replay()
@@ -1135,6 +1150,7 @@ class JoyOmniV2VStreamingSession:
         *,
         profile: dict[str, Any],
         chunk_idx: int,
+        ref_video_value_scale: torch.Tensor | None = None,
         frozen_anchor_id: int | None = None,
         identity_recovery_anchor_id: int | None = None,
     ) -> torch.Tensor:
@@ -1239,6 +1255,7 @@ class JoyOmniV2VStreamingSession:
                 runner,
                 ref_chunk_latent,
                 current_chunk_latents,
+                ref_video_value_scale,
                 profile=profile,
                 history_chunk_ids=history_chunk_ids,
                 active_chunk_id=active_chunk_id,
@@ -1264,6 +1281,7 @@ class JoyOmniV2VStreamingSession:
                         timestep=t_expand,
                         encoder_hidden_states=self.streaming_cond_embeds,
                         ref_video_latent=ref_chunk_latent,
+                        ref_video_value_scale=ref_video_value_scale,
                         current_temporal_ids=current_chunk_temporal_ids.unsqueeze(0).expand(
                             latent_model_input.shape[0], -1
                         ),
@@ -1652,10 +1670,24 @@ class JoyOmniV2VStreamingSession:
                         profile=job.profile,
                         chunk_idx=job.chunk_idx,
                     )
+                    ref_video_value_scale = build_face_value_scale(
+                        ref_chunk_latent,
+                        job.source_metas,
+                        enabled=self.settings.face_value_control_enabled,
+                        max_gain=self.settings.mouth_control_gain,
+                        patch_size=tuple(self.pipeline.transformer.patch_size),
+                        profile=job.profile,
+                    )
                     ref_chunk_latent = apply_mouth_latent_control(
                         ref_chunk_latent,
                         job.source_metas,
-                        enabled=self.settings.mouth_latent_control_enabled,
+                        # Validate one intervention at a time.  The older
+                        # latent-amplitude experiment is bypassed whenever the
+                        # regional attention-value path is active.
+                        enabled=(
+                            self.settings.mouth_latent_control_enabled
+                            and not self.settings.face_value_control_enabled
+                        ),
                         max_gain=self.settings.mouth_control_gain,
                         profile=job.profile,
                     )
@@ -1668,7 +1700,14 @@ class JoyOmniV2VStreamingSession:
                     )
                 self._timer_record(job.profile, "reference_prepare_s", started)
                 self._set_debug_state("vae-encode", "put_dit_queue", job.chunk_idx)
-                self._dit_queue.put(_EncodedChunk(job=job, ref_chunk_latent=ref_chunk_latent, ready_event=ready))
+                self._dit_queue.put(
+                    _EncodedChunk(
+                        job=job,
+                        ref_chunk_latent=ref_chunk_latent,
+                        ref_video_value_scale=ref_video_value_scale,
+                        ready_event=ready,
+                    )
+                )
                 self._inc_debug_counter("encoded_chunks")
             except BaseException as exc:
                 self._set_debug_state("vae-encode", "error", job.chunk_idx)
@@ -1696,11 +1735,16 @@ class JoyOmniV2VStreamingSession:
                         if self._dit_stream is not None else nullcontext()
                     )
                     with _dit_stream_ctx:
-                        _consume_on_current_stream(encoded.ready_event, encoded.ref_chunk_latent)
+                        _consume_on_current_stream(
+                            encoded.ready_event,
+                            encoded.ref_chunk_latent,
+                            encoded.ref_video_value_scale,
+                        )
                         current_chunk_latents = self._denoise_chunk(
                             encoded.ref_chunk_latent,
                             profile=encoded.job.profile,
                             chunk_idx=encoded.job.chunk_idx,
+                            ref_video_value_scale=encoded.ref_video_value_scale,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
                             identity_recovery_anchor_id=(
                                 encoded.job.identity_recovery_anchor_id

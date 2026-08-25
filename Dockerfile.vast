@@ -51,6 +51,7 @@ COPY . /opt/joyai
 # These tests are CPU-only and neither load nor modify the JoyAI checkpoint.
 RUN python3 -X utf8 -m unittest \
         tests.test_mouth_latent_control \
+        tests.test_face_value_control \
         tests.test_mouth_inference_contract
 
 RUN chmod +x /opt/joyai/deploy/run_server.sh /opt/joyai/vast/onstart.sh \

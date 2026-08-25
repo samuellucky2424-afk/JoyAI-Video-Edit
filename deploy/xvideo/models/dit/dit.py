@@ -349,6 +349,7 @@ class MMDoubleStreamBlock(nn.Module):
         txt: torch.Tensor,
         vec: torch.Tensor,
         vis_freqs_cis: tuple = None,
+        img_value_scale: Optional[torch.Tensor] = None,
         kv_cache_reader: Optional[Callable[[Optional[int]], Iterable[Dict[str, torch.Tensor]]]] = None,
         kv_cache_writer: Optional[Callable[[Optional[int], torch.Tensor, torch.Tensor], None]] = None,
         kv_cache_assembler: Optional[Callable[..., Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]] = None,
@@ -410,6 +411,20 @@ class MMDoubleStreamBlock(nn.Module):
         img_qkv = self._fp8_img_attn_qkv(img_modulated) if _fp8_on else self.img_attn_qkv(img_modulated)
         _iv = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.heads_num, -1)
         img_q, img_k, img_v = _iv[:, :, 0], _iv[:, :, 1], _iv[:, :, 2]
+        if img_value_scale is not None:
+            if img_value_scale.shape != (
+                img_v.shape[0], img_v.shape[1], 1, 1
+            ):
+                raise ValueError(
+                    "`img_value_scale` must match image-token values: "
+                    f"{tuple(img_value_scale.shape)} != "
+                    f"{(img_v.shape[0], img_v.shape[1], 1, 1)}."
+                )
+            img_value_scale = img_value_scale.to(
+                device=img_v.device,
+                dtype=img_v.dtype,
+            )
+            img_v = img_v * img_value_scale
         if kv_cache_pre_rope:
             img_k_for_cache = _sgl_fused.rmsnorm_qk_bf16(
                 img_k, self.img_attn_k_norm.weight, eps=self.img_attn_k_norm.eps
@@ -943,6 +958,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         timestep: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         ref_video_latent: Optional[torch.Tensor] = None,
+        ref_video_value_scale: Optional[torch.Tensor] = None,
         current_temporal_ids: Optional[torch.Tensor] = None,
         cached_temporal_ids: Optional[torch.Tensor] = None,
         kv_cache_mode: Optional[str] = None,
@@ -991,6 +1007,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         latent_segments = [hidden_tokens]
         rotary_segments = [current_rotary]
         source_id_segments = [current_source_id]
+        visual_value_scale = None
 
         if ref_video_latent is not None:
             if ref_video_latent.shape[0] != batch_size:
@@ -1004,6 +1021,33 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                     f"{ref_video_patch_shape[1:]} != {current_patch_shape[1:]}."
                 )
             ref_video_tokens = self.img_in(ref_video_latent).flatten(2).transpose(1, 2)
+            if ref_video_value_scale is not None:
+                expected_scale_shape = (
+                    batch_size,
+                    ref_video_tokens.shape[1],
+                )
+                if ref_video_value_scale.shape != expected_scale_shape:
+                    raise ValueError(
+                        "`ref_video_value_scale` must have one value per "
+                        "edit-condition token: "
+                        f"{tuple(ref_video_value_scale.shape)} != "
+                        f"{expected_scale_shape}."
+                    )
+                target_scale = torch.ones(
+                    (batch_size, current_seq_len),
+                    device=device,
+                    dtype=ref_video_tokens.dtype,
+                )
+                visual_value_scale = torch.cat(
+                    [
+                        target_scale,
+                        ref_video_value_scale.to(
+                            device=device,
+                            dtype=ref_video_tokens.dtype,
+                        ),
+                    ],
+                    dim=1,
+                ).view(batch_size, -1, 1, 1)
             video_frame_ids = self._get_token_frame_ids(ref_video_patch_shape, device, temporal_ids=temporal_ids)
             latent_segments.append(ref_video_tokens)
             rotary_segments.append(self.get_rotary_pos_embed_from_ids(
@@ -1094,6 +1138,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 txt,
                 vec,
                 vis_freqs_cis,
+                img_value_scale=visual_value_scale,
                 layer_idx=layer_idx,
                 kv_cache_reader=None if _graph_assembler is not None else (
                     self._read_layer_kv_cache if kv_cache_mode in {"reuse", "reuse_store"} else None),

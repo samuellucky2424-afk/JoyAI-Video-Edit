@@ -679,6 +679,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "max_temporal_ids": args.max_temporal_ids,
             "mouth_control": args.mouth_control,
             "mouth_latent_control": args.mouth_latent_control,
+            "face_value_control": args.face_value_control,
             "mouth_control_gain": args.mouth_control_gain,
             "record_enabled": args.record_dir is not None,
         }
@@ -1530,6 +1531,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 args.mouth_latent_control,
                             )
                         ) and mouth_control_enabled
+                        face_value_control_enabled = bool(
+                            payload.get(
+                                "face_value_control",
+                                args.face_value_control,
+                            )
+                        ) and mouth_control_enabled
                         kv_reset_frames = max(0, int(payload.get("kv_reset_frames", args.kv_reset_frames)))
                         # The reference KV is the long-lived identity anchor.
                         # Resetting the entire session drops both the generated
@@ -1689,6 +1696,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             mouth_latent_control_enabled=(
                                 mouth_latent_control_enabled
                             ),
+                            face_value_control_enabled=(
+                                face_value_control_enabled
+                            ),
                             mouth_control_gain=mouth_control_gain,
                             identity_occlusion_recovery=identity_occlusion_recovery,
                             identity_recovery_clean_chunks=(
@@ -1710,6 +1720,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "mouth_control": session_settings.mouth_control_enabled,
                             "mouth_latent_control": (
                                 session_settings.mouth_latent_control_enabled
+                            ),
+                            "face_value_control": (
+                                session_settings.face_value_control_enabled
                             ),
                             "mouth_control_gain": session_settings.mouth_control_gain,
                             "identity_occlusion_recovery": (
@@ -1746,6 +1759,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ws_debug["mouth_latent_control"] = (
                             session_settings.mouth_latent_control_enabled
                         )
+                        ws_debug["face_value_control"] = (
+                            session_settings.face_value_control_enabled
+                        )
                         ws_debug["mouth_control_gain"] = session_settings.mouth_control_gain
                         ws_debug["session_config"] = session_config
                         ws_debug["last_message_type"] = "start"
@@ -1765,6 +1781,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "mouth_control": session_settings.mouth_control_enabled,
                                 "mouth_latent_control": (
                                     session_settings.mouth_latent_control_enabled
+                                ),
+                                "face_value_control": (
+                                    session_settings.face_value_control_enabled
                                 ),
                                 "mouth_control_gain": session_settings.mouth_control_gain,
                                 "frame_audit": True,
@@ -1834,6 +1853,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "mouth_roi": payload.get("mouth_roi"),
                             "mouth_geometry": payload.get("mouth_geometry"),
                             "mouth_blendshapes": payload.get("mouth_blendshapes"),
+                            "eye_landmark_available": payload.get(
+                                "eye_landmark_available"
+                            ),
+                            "eye_rois": payload.get("eye_rois"),
+                            "eye_blendshapes": payload.get("eye_blendshapes"),
                             "mouth_anatomy": payload.get("mouth_anatomy"),
                             "mouth_patch": payload.get("mouth_patch"),
                             "mouth_event_significant": payload.get(
@@ -2398,6 +2422,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Experimentally emphasize the validated mouth ROI in the existing "
             "source conditioning latent. Disabled by default; does not alter weights."
+        ),
+    )
+    parser.add_argument(
+        "--face-value-control",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Experimentally apply bounded regional attention-value scaling "
+            "to source eye and mouth edit-condition tokens. Disabled by "
+            "default; does not alter weights or reference-image identity KV."
         ),
     )
     parser.add_argument(

@@ -41,6 +41,22 @@ const FACE_OVAL_INDICES = Array.from(
     ]),
   ),
 ).sort((a, b) => a - b);
+const LEFT_EYE_INDICES = Array.from(
+  new Set(
+    FaceLandmarker.FACE_LANDMARKS_LEFT_EYE.flatMap((connection) => [
+      connection.start,
+      connection.end,
+    ]),
+  ),
+).sort((a, b) => a - b);
+const RIGHT_EYE_INDICES = Array.from(
+  new Set(
+    FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE.flatMap((connection) => [
+      connection.start,
+      connection.end,
+    ]),
+  ),
+).sort((a, b) => a - b);
 
 const MOUTH_BLENDSHAPES = new Set([
   "jawOpen",
@@ -58,6 +74,14 @@ const MOUTH_BLENDSHAPES = new Set([
   "mouthShrugLower",
   "mouthShrugUpper",
 ]);
+const EYE_BLENDSHAPES = new Set([
+  "eyeBlinkLeft",
+  "eyeBlinkRight",
+  "eyeSquintLeft",
+  "eyeSquintRight",
+  "eyeWideLeft",
+  "eyeWideRight",
+]);
 
 let faceLandmarker = null;
 let handLandmarker = null;
@@ -65,6 +89,7 @@ let delegate = "CPU";
 let handDelegate = null;
 let processing = false;
 let smoothedRoi = null;
+let smoothedEyeRois = { left: null, right: null };
 let previousLipPoints = null;
 let previousJawOpen = null;
 let previousAnatomyEvidence = null;
@@ -94,6 +119,31 @@ function stabilizeRoi(roi) {
     height: smoothValue(smoothedRoi.height, roi.height),
   };
   return smoothedRoi;
+}
+
+function stabilizeEyeRoi(side, roi) {
+  const previous = smoothedEyeRois[side];
+  if (!previous) {
+    smoothedEyeRois[side] = { ...roi };
+    return smoothedEyeRois[side];
+  }
+  smoothedEyeRois[side] = {
+    x: smoothValue(previous.x, roi.x),
+    y: smoothValue(previous.y, roi.y),
+    width: smoothValue(previous.width, roi.width),
+    height: smoothValue(previous.height, roi.height),
+  };
+  return smoothedEyeRois[side];
+}
+
+function eyeRois(landmarks) {
+  const left = landmarkRoi(landmarks, LEFT_EYE_INDICES, 0.014, 0.018);
+  const right = landmarkRoi(landmarks, RIGHT_EYE_INDICES, 0.014, 0.018);
+  if (!left || !right) return null;
+  return {
+    left: stabilizeEyeRoi("left", left),
+    right: stabilizeEyeRoi("right", right),
+  };
 }
 
 function mouthRoi(landmarks) {
@@ -128,12 +178,12 @@ function mouthRoi(landmarks) {
   };
 }
 
-function blendshapeMap(result) {
+function blendshapeMap(result, selectedNames) {
   const categories = result.faceBlendshapes?.[0]?.categories || [];
   const selected = {};
   for (const category of categories) {
     const name = category.categoryName || category.displayName;
-    if (MOUTH_BLENDSHAPES.has(name)) {
+    if (selectedNames.has(name)) {
       selected[name] = Number(Number(category.score || 0).toFixed(6));
     }
   }
@@ -314,6 +364,7 @@ async function initialize(data) {
 
 function resetTracking() {
   smoothedRoi = null;
+  smoothedEyeRois = { left: null, right: null };
   previousLipPoints = null;
   previousJawOpen = null;
   previousAnatomyEvidence = null;
@@ -387,7 +438,9 @@ async function detectFrame(data) {
     const occlusion = identityOcclusion(landmarks, latestHandResult);
 
     const mouth = mouthRoi(landmarks);
-    const blendshapes = blendshapeMap(result);
+    const eyes = eyeRois(landmarks);
+    const blendshapes = blendshapeMap(result, MOUTH_BLENDSHAPES);
+    const eyeBlendshapes = blendshapeMap(result, EYE_BLENDSHAPES);
     const motion = mouth ? lipMotion(mouth.lipPoints, mouth.lipWidth) : 0;
     const jawOpen = Number(blendshapes.jawOpen || 0);
     const lipAspect = mouth
@@ -433,6 +486,8 @@ async function detectFrame(data) {
           }
         : null,
       blendshapes,
+      eyeRois: eyes,
+      eyeBlendshapes,
       significant,
       anatomy,
       anatomyError,
