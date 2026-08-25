@@ -15,6 +15,7 @@ if str(DEPLOY) not in sys.path:
 
 from xvideo.serving.face_value_control import (  # noqa: E402
     EYE_VALUE_MAX_GAIN,
+    MOUTH_INTERIOR_VALUE_MAX_GAIN,
     MOUTH_VALUE_MAX_GAIN,
     build_face_value_scale,
 )
@@ -24,10 +25,10 @@ from xvideo.serving.mouth_anatomy import (  # noqa: E402
 )
 
 
-def _meta(*, anatomy=None, mouth=None, eyes=None, eye_rois=None):
+def _meta(*, anatomy=None, mouth=None, eyes=None, eye_rois=None, seq=21):
     return {
         "mouth_landmark_available": True,
-        "mouth_landmark_seq": 21,
+        "mouth_landmark_seq": seq,
         "mouth_roi": {"x": 0.4, "y": 0.58, "width": 0.2, "height": 0.16},
         "mouth_anatomy": {
             "schema_version": MOUTH_ANATOMY_SCHEMA_VERSION,
@@ -62,6 +63,8 @@ class FaceValueControlGeometryTests(unittest.TestCase):
         self.assertLessEqual(MOUTH_VALUE_MAX_GAIN, 1.125)
         self.assertGreater(EYE_VALUE_MAX_GAIN, 1.0)
         self.assertLess(EYE_VALUE_MAX_GAIN, MOUTH_VALUE_MAX_GAIN)
+        self.assertGreater(MOUTH_INTERIOR_VALUE_MAX_GAIN, MOUTH_VALUE_MAX_GAIN)
+        self.assertLessEqual(MOUTH_INTERIOR_VALUE_MAX_GAIN, 1.16)
 
 
 @unittest.skipIf(
@@ -91,9 +94,66 @@ class FaceValueControlTensorTests(unittest.TestCase):
                 self.assertEqual(scale.shape, (1, 20 * 35))
                 self.assertEqual(scale.dtype, latent.dtype)
                 self.assertGreater(float(scale.max()), 1.0)
-                self.assertLessEqual(float(scale.max()), MOUTH_VALUE_MAX_GAIN)
+                self.assertLessEqual(
+                    float(scale.max()),
+                    MOUTH_INTERIOR_VALUE_MAX_GAIN,
+                )
                 self.assertIn(event, profile["face_value_control_mouth_events"])
                 self.assertTrue(bool(torch.any(scale == 1).item()))
+
+    def test_short_tongue_event_is_not_smeared_across_latent_time(self):
+        latent = torch.zeros(1, 8, 2, 20, 35, dtype=torch.bfloat16)
+        neutral = [_meta(seq=index) for index in range(4)]
+        tongue = [
+            _meta(
+                seq=index,
+                anatomy={
+                    "lips": 0.9,
+                    "teeth": 0.0,
+                    "tongue": 0.92,
+                    "oral_cavity": 0.86,
+                },
+            )
+            for index in range(4, 8)
+        ]
+        profile = {}
+        scale = build_face_value_scale(
+            latent,
+            neutral + tongue,
+            enabled=True,
+            max_gain=1.35,
+            patch_size=(1, 1, 1),
+            profile=profile,
+        )
+        self.assertIsNotNone(scale)
+        temporal = scale.view(1, 2, 20, 35)
+        self.assertTrue(bool(torch.all(temporal[:, 0] == 1).item()))
+        self.assertGreater(float(temporal[:, 1].max()), MOUTH_VALUE_MAX_GAIN)
+        self.assertTrue(
+            all(
+                region["latent_frames"] == [1]
+                for region in profile["face_value_control_regions"]
+            )
+        )
+
+    def test_eye_event_is_applied_only_to_its_latent_time_slice(self):
+        latent = torch.zeros(1, 8, 2, 20, 35)
+        blink = [
+            _meta(seq=index, eyes={"eyeBlinkLeft": 0.96})
+            for index in range(4)
+        ]
+        neutral = [_meta(seq=index) for index in range(4, 8)]
+        scale = build_face_value_scale(
+            latent,
+            blink + neutral,
+            enabled=True,
+            max_gain=1.35,
+            patch_size=(1, 1, 1),
+        )
+        self.assertIsNotNone(scale)
+        temporal = scale.view(1, 2, 20, 35)
+        self.assertGreater(float(temporal[:, 0].max()), 1.0)
+        self.assertTrue(bool(torch.all(temporal[:, 1] == 1).item()))
 
     def test_left_and_right_eye_events_are_independent_and_bounded(self):
         latent = torch.zeros(1, 8, 1, 20, 35)

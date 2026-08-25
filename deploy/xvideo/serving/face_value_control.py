@@ -19,8 +19,11 @@ from xvideo.serving.mouth_control import build_mouth_control, normalize_mouth_ro
 
 
 # Attention values are more direct than latent amplitude (which is normalized
-# inside every transformer block), so keep the first live-test caps small.
+# inside every transformer block), so keep the live-test caps small.  Anatomy
+# gets a slightly stronger cap only inside the lip interior; the surrounding
+# lip shape and both eye regions retain the original conservative caps.
 MOUTH_VALUE_MAX_GAIN = 1.125
+MOUTH_INTERIOR_VALUE_MAX_GAIN = 1.16
 EYE_VALUE_MAX_GAIN = 1.075
 FACE_EVENT_ACTIVE_THRESHOLD = 0.15
 
@@ -30,6 +33,7 @@ class _Region:
     name: str
     roi: tuple[float, float, float, float]
     gain: float
+    latent_frames: tuple[int, ...]
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -63,6 +67,37 @@ def _unique_fresh_metas(
         key = ("seq", sequence) if sequence is not None else ("index", index)
         unique[key] = meta
     return list(unique.values())
+
+
+def _temporal_meta_buckets(
+    metas: Sequence[Mapping[str, Any]],
+    *,
+    latent_frames: int,
+) -> list[list[Mapping[str, Any]]]:
+    """Map ordered camera metadata onto the VAE's latent time slices.
+
+    Live chunks contain eight new camera frames and two post-VAE latent
+    frames.  Equal contiguous buckets therefore preserve the causal 4:1
+    temporal compression instead of letting one short expression activate the
+    entire chunk.  The generic partition also keeps unit tests and the first
+    one-frame chunk well defined.
+    """
+
+    if latent_frames < 1:
+        return []
+    ordered = [meta for meta in metas if isinstance(meta, Mapping)]
+    if not ordered:
+        return [[] for _ in range(latent_frames)]
+    buckets: list[list[Mapping[str, Any]]] = []
+    sample_count = len(ordered)
+    for latent_index in range(latent_frames):
+        start = (latent_index * sample_count) // latent_frames
+        end = ((latent_index + 1) * sample_count) // latent_frames
+        if end <= start:
+            start = min(start, sample_count - 1)
+            end = start + 1
+        buckets.append(ordered[start:end])
+    return buckets
 
 
 def _mouth_events(meta: Mapping[str, Any]) -> set[str]:
@@ -132,61 +167,103 @@ def _union_roi(
     )
 
 
+def _mouth_interior_roi(
+    roi: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Return a conservative inner-mouth box for teeth/tongue/cavity values."""
+
+    x, y, width, height = roi
+    return (
+        round(x + 0.14 * width, 6),
+        round(y + 0.18 * height, 6),
+        round(0.72 * width, 6),
+        round(0.64 * height, 6),
+    )
+
+
 def _build_regions(
-    metas: list[Mapping[str, Any]],
+    metas: Sequence[Mapping[str, Any]],
     *,
     max_gain: float,
+    latent_frames: int,
 ) -> tuple[list[_Region], list[str], list[str]]:
     regions: list[_Region] = []
     mouth_events: set[str] = set()
-    mouth = build_mouth_control(metas, enabled=True, max_gain=max_gain)
-    if mouth.active and mouth.roi is not None:
-        for meta in metas:
-            if bool(meta.get("mouth_landmark_available")):
-                mouth_events.update(_mouth_events(meta))
-        regions.append(
-            _Region(
-                name="mouth",
-                roi=mouth.roi,
-                gain=min(float(mouth.gain), MOUTH_VALUE_MAX_GAIN),
-            )
-        )
-
     eye_sides: list[str] = []
     bounded_eye_gain = min(float(max_gain), EYE_VALUE_MAX_GAIN)
-    for side in ("left", "right"):
-        candidates: list[tuple[tuple[float, float, float, float], float]] = []
-        for meta in metas:
-            if not bool(meta.get("eye_landmark_available")):
-                continue
-            roi = normalize_mouth_roi(_mapping(meta.get("eye_rois")).get(side))
-            strength = _eye_strength(meta, side)
-            if roi is None or strength < FACE_EVENT_ACTIVE_THRESHOLD:
-                continue
-            candidates.append((roi, strength))
-        if not candidates:
+    for latent_index, bucket in enumerate(
+        _temporal_meta_buckets(metas, latent_frames=latent_frames)
+    ):
+        fresh = _unique_fresh_metas(bucket)
+        if not fresh:
             continue
-        strength = max(item[1] for item in candidates)
-        normalized = max(
-            0.0,
-            min(
-                1.0,
-                (strength - FACE_EVENT_ACTIVE_THRESHOLD)
-                / (1.0 - FACE_EVENT_ACTIVE_THRESHOLD),
-            ),
-        )
-        gain = 1.0 + (bounded_eye_gain - 1.0) * normalized
-        if gain <= 1.0:
-            continue
-        regions.append(
-            _Region(
-                name=f"eye_{side}",
-                roi=_union_roi([item[0] for item in candidates]),
-                gain=gain,
+
+        bucket_events: set[str] = set()
+        mouth = build_mouth_control(fresh, enabled=True, max_gain=max_gain)
+        if mouth.active and mouth.roi is not None:
+            for meta in fresh:
+                if bool(meta.get("mouth_landmark_available")):
+                    bucket_events.update(_mouth_events(meta))
+            mouth_events.update(bucket_events)
+            regions.append(
+                _Region(
+                    name="mouth",
+                    roi=mouth.roi,
+                    gain=min(float(mouth.gain), MOUTH_VALUE_MAX_GAIN),
+                    latent_frames=(latent_index,),
+                )
             )
-        )
-        eye_sides.append(side)
-    return regions, sorted(mouth_events), eye_sides
+            if bucket_events.intersection({"teeth", "tongue", "oral_cavity"}):
+                regions.append(
+                    _Region(
+                        name="mouth_interior",
+                        roi=_mouth_interior_roi(mouth.roi),
+                        gain=min(
+                            float(mouth.gain),
+                            MOUTH_INTERIOR_VALUE_MAX_GAIN,
+                        ),
+                        latent_frames=(latent_index,),
+                    )
+                )
+
+        for side in ("left", "right"):
+            candidates: list[
+                tuple[tuple[float, float, float, float], float]
+            ] = []
+            for meta in fresh:
+                if not bool(meta.get("eye_landmark_available")):
+                    continue
+                roi = normalize_mouth_roi(
+                    _mapping(meta.get("eye_rois")).get(side)
+                )
+                strength = _eye_strength(meta, side)
+                if roi is None or strength < FACE_EVENT_ACTIVE_THRESHOLD:
+                    continue
+                candidates.append((roi, strength))
+            if not candidates:
+                continue
+            strength = max(item[1] for item in candidates)
+            normalized = max(
+                0.0,
+                min(
+                    1.0,
+                    (strength - FACE_EVENT_ACTIVE_THRESHOLD)
+                    / (1.0 - FACE_EVENT_ACTIVE_THRESHOLD),
+                ),
+            )
+            gain = 1.0 + (bounded_eye_gain - 1.0) * normalized
+            if gain <= 1.0:
+                continue
+            regions.append(
+                _Region(
+                    name=f"eye_{side}",
+                    roi=_union_roi([item[0] for item in candidates]),
+                    gain=gain,
+                    latent_frames=(latent_index,),
+                )
+            )
+            eye_sides.append(side)
+    return regions, sorted(mouth_events), sorted(set(eye_sides))
 
 
 def _latent_box(
@@ -231,6 +308,7 @@ def _profile(
                     "name": region.name,
                     "roi": list(region.roi),
                     "gain": round(float(region.gain), 6),
+                    "latent_frames": list(region.latent_frames),
                 }
                 for region in regions
             ],
@@ -296,10 +374,11 @@ def build_face_value_scale(
         _profile(profile, applied=False, reason="incompatible_patch_size")
         return None
 
-    unique = _unique_fresh_metas(metas)
+    ordered_metas = [meta for meta in metas if isinstance(meta, Mapping)]
     regions, mouth_events, eye_sides = _build_regions(
-        unique,
+        ordered_metas,
         max_gain=bounded_gain,
+        latent_frames=frames,
     )
     if not regions:
         _profile(
@@ -316,7 +395,7 @@ def build_face_value_scale(
         device=ref_video_latent.device,
         dtype=torch.float32,
     )
-    changed_cells: set[tuple[int, int]] = set()
+    changed_cells: set[tuple[int, int, int]] = set()
     applied_regions: list[_Region] = []
     for region in regions:
         box = _latent_box(region.roi, height=height, width=width)
@@ -337,13 +416,20 @@ def build_face_value_scale(
             1, 1, 1, roi_height, roi_width
         )
         candidate = 1.0 + (float(region.gain) - 1.0) * feather
-        target = scale_map[..., top:bottom, left:right]
-        scale_map[..., top:bottom, left:right] = torch.maximum(target, candidate)
-        changed_cells.update(
-            (row, column)
-            for row in range(top, bottom)
-            for column in range(left, right)
-        )
+        for latent_index in region.latent_frames:
+            if not 0 <= latent_index < frames:
+                continue
+            target = scale_map[
+                :, :, latent_index : latent_index + 1, top:bottom, left:right
+            ]
+            scale_map[
+                :, :, latent_index : latent_index + 1, top:bottom, left:right
+            ] = torch.maximum(target, candidate)
+            changed_cells.update(
+                (latent_index, row, column)
+                for row in range(top, bottom)
+                for column in range(left, right)
+            )
         applied_regions.append(region)
 
     if not applied_regions:
@@ -370,6 +456,6 @@ def build_face_value_scale(
         mouth_events=mouth_events,
         eye_sides=eye_sides,
         regions=applied_regions,
-        changed_fraction=len(changed_cells) / float(height * width),
+        changed_fraction=len(changed_cells) / float(frames * height * width),
     )
     return token_scale
