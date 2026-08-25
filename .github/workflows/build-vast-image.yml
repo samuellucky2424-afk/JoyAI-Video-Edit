@@ -8,6 +8,7 @@ on:
       - beam-occlusion-recovery-v1
       - beam-mouth-latent-control-v1
       - beam-face-expression-values-v1
+      - beam-face-temporal-control-v2
     paths:
       - Dockerfile.vast
       - deploy/**
