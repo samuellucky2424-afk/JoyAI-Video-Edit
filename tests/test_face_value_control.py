@@ -18,6 +18,10 @@ from xvideo.serving.face_value_control import (  # noqa: E402
     MOUTH_VALUE_MAX_GAIN,
     build_face_value_scale,
 )
+from xvideo.serving.mouth_anatomy import (  # noqa: E402
+    MOUTH_ANATOMY_METHOD,
+    MOUTH_ANATOMY_SCHEMA_VERSION,
+)
 
 
 def _meta(*, anatomy=None, mouth=None, eyes=None, eye_rois=None):
@@ -26,6 +30,8 @@ def _meta(*, anatomy=None, mouth=None, eyes=None, eye_rois=None):
         "mouth_landmark_seq": 21,
         "mouth_roi": {"x": 0.4, "y": 0.58, "width": 0.2, "height": 0.16},
         "mouth_anatomy": {
+            "schema_version": MOUTH_ANATOMY_SCHEMA_VERSION,
+            "method": MOUTH_ANATOMY_METHOD,
             "available": True,
             "roi_confidence": 0.95,
             "region_evidence": anatomy
