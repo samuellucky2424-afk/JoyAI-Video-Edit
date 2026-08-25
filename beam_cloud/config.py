@@ -6,13 +6,14 @@ from pathlib import PurePosixPath
 APP_NAME = "joyai-video-edit"
 MODEL_DOWNLOAD_APP_NAME = "joyai-model-download"
 
-# This digest was published from repository commit 84838a0e6b8cb5a814e73a412ba7a605ddde1cb1.
-# It adds bounded mouth-latent conditioning without modifying the validated checkpoint.
+# This digest was published from repository commit 7b3df0a51a438ff7f625e2811afa6782f8e58410.
+# It adds bounded eye/mouth source-value conditioning without modifying the
+# validated checkpoint or the uploaded reference-image identity KV.
 IMAGE_URI = (
     "ghcr.io/samuellucky2424-afk/joyai-video-edit@"
-    "sha256:91d93e9608687c08a22e8d0bda7383ee104a97422d1fdfa7604f9f3196b1faf4"
+    "sha256:4f3f77ba936f8e2d82e702fcd6502795ae547d697f268246c5025eefcfbdb700"
 )
-IMAGE_REVISION = "84838a0e6b8cb5a814e73a412ba7a605ddde1cb1"
+IMAGE_REVISION = "7b3df0a51a438ff7f625e2811afa6782f8e58410"
 
 GPU_TYPE = "RTXPro6000"
 GPU_POOL = "joyai-rtx-pro-6000"
