@@ -1,4 +1,4 @@
-name: Build Vast container image
+name: Build JoyAI RTX PRO 6000 validation image
 
 on:
   push:
