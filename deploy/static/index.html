@@ -295,7 +295,8 @@
 <canvas id="mouthCapture" style="display:none"></canvas>
 <canvas id="mouthPatchCapture" style="display:none"></canvas>
 <div id="refLightbox" class="ref-lightbox"><img id="refLightboxImg" alt="reference enlarged" /></div>
-<script>
+<script type="module">
+import { FrameResultBroker } from "/static/face-tracking.js";
 const SERVER_DEFAULTS = (typeof __SERVER_DEFAULTS__ === "undefined")
   ? {}
   : __SERVER_DEFAULTS__;
@@ -723,13 +724,11 @@ const MOUTH_TRACKER_MODEL_URL =
 const HAND_TRACKER_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const MOUTH_TRACKER_WIDTH = 384;
-const MOUTH_TRACKER_INTERVAL_MS = 1000 / 15;
-const MOUTH_TRACKER_MAX_RESULT_AGE_MS = 350;
+const MOUTH_TRACKER_MAX_RESULT_AGE_MS = 100;
 const MOUTH_EVENT_MIN_PRESERVE_INTERVAL_MS = 100;
 let mouthTrackerWorker = null;
 let mouthTrackerReady = false;
-let mouthTrackerBusy = false;
-let mouthTrackerLastSubmitMs = 0;
+const mouthFrameBroker = new FrameResultBroker({ budgetMs: 25 });
 let mouthTrackerLatest = null;
 let mouthTrackerProcessedTotal = 0;
 let mouthTrackerDropTotal = 0;
@@ -772,16 +771,17 @@ function ensureMouthTracker() {
     mouthTrackerErrorTotal += 1;
     return;
   }
+  const worker = mouthTrackerWorker;
   mouthTrackerWorker.onmessage = (event) => {
+    if (worker !== mouthTrackerWorker) return;
     const result = event.data || {};
     if (result.type === "ready") {
       mouthTrackerReady = true;
-      mouthTrackerBusy = false;
       mouthTrackerLastError = null;
       return;
     }
     if (result.type === "result") {
-      mouthTrackerBusy = false;
+      if (!mouthFrameBroker.receive(result)) return;
       if (result.epoch !== mouthTrackerEpoch) return;
       mouthTrackerProcessedTotal += 1;
       mouthTrackerLatest = result;
@@ -789,7 +789,7 @@ function ensureMouthTracker() {
       return;
     }
     if (result.type === "dropped") {
-      mouthTrackerBusy = false;
+      mouthFrameBroker.receive(result);
       if (result.epoch !== mouthTrackerEpoch) return;
       mouthTrackerDropTotal += 1;
       return;
@@ -799,14 +799,16 @@ function ensureMouthTracker() {
       return;
     }
     if (result.type === "detect_error" || result.type === "error") {
-      mouthTrackerBusy = false;
+      if (result.type === "error") mouthFrameBroker.reset();
+      else if (!mouthFrameBroker.receive(result)) return;
       mouthTrackerErrorTotal += 1;
       mouthTrackerLastError = result.error || result.type;
       console.error("MediaPipe mouth tracker error:", mouthTrackerLastError);
     }
   };
   mouthTrackerWorker.onerror = (event) => {
-    mouthTrackerBusy = false;
+    if (worker !== mouthTrackerWorker) return;
+    mouthFrameBroker.reset();
     mouthTrackerReady = false;
     mouthTrackerErrorTotal += 1;
     mouthTrackerLastError = event.message || "Worker failed to load";
@@ -820,45 +822,54 @@ function ensureMouthTracker() {
   });
 }
 
-async function observeMouthFrame(now) {
+async function observeMouthFrame(frame) {
+  // Recover a worker that never replies without waiting or growing a queue.
+  if (mouthFrameBroker.active && Date.now() - mouthFrameBroker.active.captureTimeMs > 2000) {
+    closeMouthTracker();
+  }
   ensureMouthTracker();
-  if (!mouthTrackerWorker || !mouthTrackerReady || mouthTrackerBusy) {
-    if (mouthTrackerBusy) mouthTrackerDropTotal += 1;
-    return;
-  }
-  if (now - mouthTrackerLastSubmitMs < MOUTH_TRACKER_INTERVAL_MS) return;
-  if (!camera || camera.readyState < 2 || !camera.videoWidth || !camera.videoHeight) return;
-  mouthTrackerLastSubmitMs = now;
-  mouthTrackerBusy = true;
-  const configuredWidth = Math.max(1, Number(document.getElementById("width").value) || 840);
-  const configuredHeight = Math.max(1, Number(document.getElementById("height").value) || 480);
-  const trackerHeight = Math.max(1, Math.round(MOUTH_TRACKER_WIDTH * configuredHeight / configuredWidth));
-  try {
-    drawCameraFrameToCanvas(mouthCapture, MOUTH_TRACKER_WIDTH, trackerHeight);
+  if (!mouthTrackerWorker || !mouthTrackerReady) return null;
+  const worker = mouthTrackerWorker;
+  const result = await mouthFrameBroker.request(frame, async (job) => {
+    mouthCapture.width = MOUTH_TRACKER_WIDTH;
+    mouthCapture.height = Math.max(1, Math.round(MOUTH_TRACKER_WIDTH * capture.height / capture.width));
+    // Read the frozen uplink canvas, not the advancing camera element.
+    mouthCapture.getContext("2d").drawImage(capture, 0, 0, mouthCapture.width, mouthCapture.height);
     const bitmap = await createImageBitmap(mouthCapture);
-    mouthTrackerWorker.postMessage({
-      type: "frame",
-      bitmap,
-      timestampMs: Math.round(now),
-      captureTimeMs: Date.now(),
-      cameraFrameSeq: cameraFrameTotal,
-      epoch: mouthTrackerEpoch,
-    }, [bitmap]);
-  } catch (error) {
-    mouthTrackerBusy = false;
-    mouthTrackerErrorTotal += 1;
-  }
+    if (worker !== mouthTrackerWorker || !mouthFrameBroker.matches(job)) {
+      bitmap.close();
+      return;
+    }
+    try {
+      worker.postMessage({
+        type: "frame", bitmap,
+        timestampMs: performance.now(),
+        captureTimeMs: job.captureTimeMs,
+        cameraFrameSeq: job.cameraFrameSeq,
+        captureSeq: job.captureSeq,
+        requestId: job.requestId,
+        epoch: job.epoch,
+      }, [bitmap]);
+    } catch (error) {
+      bitmap.close();
+      throw error;
+    }
+  });
+  if (!result && frame.epoch === mouthTrackerEpoch) mouthTrackerDropTotal += 1;
+  return result;
 }
 
-function mouthTrackerFrameMeta(nowMs) {
-  const result = mouthTrackerLatest;
-  const age = result && result.captureTimeMs ? Math.max(0, nowMs - result.captureTimeMs) : null;
-  const available = Boolean(result && result.facePresent && age !== null && age <= MOUTH_TRACKER_MAX_RESULT_AGE_MS);
+function mouthTrackerFrameMeta(nowMs, result, frame) {
+  const age = result && result.captureTimeMs ? nowMs - result.captureTimeMs : null;
+  const available = Boolean(result && result.facePresent
+    && result.epoch === frame.epoch && result.captureSeq === frame.captureSeq
+    && age !== null && age >= 0 && age <= MOUTH_TRACKER_MAX_RESULT_AGE_MS);
   const occlusion = available ? (result.occlusion || {}) : {};
   const occlusionAvailable = Boolean(available && occlusion.available);
   return {
     mouth_landmark_available: available,
-    mouth_landmark_seq: available ? result.cameraFrameSeq : null,
+    mouth_landmark_seq: available ? result.captureSeq : null,
+    mouth_capture_seq: available ? result.captureSeq : null,
     mouth_landmark_age_ms: age,
     mouth_roi: available ? (result.roi || null) : null,
     mouth_geometry: available ? (result.geometry || null) : null,
@@ -891,7 +902,8 @@ function unitMouthScore(value) {
 function mouthDetailSignalActive(meta) {
   if (!meta || !meta.mouth_landmark_available || !meta.mouth_roi) return false;
   const ageMs = Number(meta.mouth_landmark_age_ms);
-  if (!Number.isFinite(ageMs) || ageMs > 180) return false;
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > MOUTH_TRACKER_MAX_RESULT_AGE_MS
+      || meta.identity_occlusion_risk) return false;
   const anatomy = meta.mouth_anatomy || {};
   const evidence = anatomy.region_evidence || {};
   const blend = meta.mouth_blendshapes || {};
@@ -969,7 +981,7 @@ function markMouthEventPreserved(result, nowMs = Date.now()) {
 function resetMouthTracker() {
   mouthTrackerEpoch += 1;
   mouthTrackerLatest = null;
-  mouthTrackerLastSubmitMs = 0;
+  mouthFrameBroker.reset();
   mouthTrackerProcessedTotal = 0;
   mouthTrackerDropTotal = 0;
   mouthTrackerErrorTotal = 0;
@@ -987,7 +999,7 @@ function closeMouthTracker() {
   try { mouthTrackerWorker.terminate(); } catch (error) {}
   mouthTrackerWorker = null;
   mouthTrackerReady = false;
-  mouthTrackerBusy = false;
+  mouthFrameBroker.reset();
 }
 
 
@@ -1235,10 +1247,10 @@ function renderStageTimings() {
     const gains = regions
       .map((region) => Number(region && region.gain))
       .filter((gain) => Number.isFinite(gain));
-    const maxGain = gains.length ? Math.max(...gains) : null;
-    const regionNames = regions
+    const maxGain = Number(p.face_value_control_max_gain) || (gains.length ? Math.max(...gains) : null);
+    const regionNames = [...new Set(regions
       .map((region) => String((region && region.name) || ""))
-      .filter(Boolean)
+      .filter(Boolean))]
       .join("+");
     const faceReason = String(
       p.face_value_control_reason || (faceActive ? "active" : "inactive")
@@ -1583,13 +1595,13 @@ function resetUplinkEncoder() {
   upPendingByTs.clear();
 }
 
-function uplinkFrameMeta(seq, captureSeq, tCaptureMs) {
-  const mouthMeta = mouthTrackerFrameMeta(Date.now());
+function uplinkFrameMeta(seq, captureSeq, tCaptureMs, result, frame) {
+  const mouthMeta = mouthTrackerFrameMeta(Date.now(), result, frame);
   return {
     seq,
     t_capture_ms: tCaptureMs,
     capture_seq: captureSeq,
-    camera_frame_seq: cameraFrameTotal,
+    camera_frame_seq: frame.cameraFrameSeq,
     client_skip_total: sendRealtimeSkips,
     client_uplink_drop_total: upDropTotal,
     client_drain_factor: 1.0,
@@ -1628,11 +1640,10 @@ function ensureUplinkEncoder(width, height) {
   upEncoder.configure(upEncoderConfig(width, height));
 }
 
-function encodeUplinkFrame(width, height, captureSeq) {
-  drawCaptureFrame(width, height);
+function encodeUplinkFrame(width, height, captureSeq, result, frame) {
   ensureUplinkEncoder(width, height);
   const seq = ++upSeq;
-  const frameMeta = uplinkFrameMeta(seq, captureSeq, Date.now());
+  const frameMeta = uplinkFrameMeta(seq, captureSeq, frame.captureTimeMs, result, frame);
   upPendingByTs.set(seq, frameMeta);
   let forceKey = false;
   if (upResumeKeyframe && ws && (ws.bufferedAmount || 0) < 131072) {
@@ -1726,7 +1737,6 @@ function flushOutputQueueToLatest() {
 function measureCameraFrame(now) {
   cameraMeasuredFrames += 1;
   cameraFrameTotal += 1;
-  void observeMouthFrame(now);
   const elapsed = Math.max((now - cameraMeasureStartedAt) / 1000, 0.001);
   if (elapsed >= 1) {
     cameraMeasuredFps = cameraMeasuredFrames / elapsed;
@@ -1840,8 +1850,7 @@ function drawCaptureFrame(width, height) {
   drawCameraFrameToCanvas(capture, width, height);
 }
 
-function frameBlob(width, height, quality) {
-  drawCaptureFrame(width, height);
+function frameBlob(quality) {
   return new Promise(resolve => capture.toBlob(resolve, "image/jpeg", quality));
 }
 
@@ -1855,6 +1864,7 @@ async function tick() {
     return;
   }
   tickInFlight = true;
+  const tickEpoch = mouthTrackerEpoch;
   try {
     if (backendPendingFrames() >= MAX_BACKEND_PENDING_FRAMES) {
       sendRealtimeSkips += 1;
@@ -1863,17 +1873,26 @@ async function tick() {
     }
     const width = Number(document.getElementById("width").value);
     const height = Number(document.getElementById("height").value);
+    const runEpoch = mouthTrackerEpoch;
+    const socket = ws;
+    const frame = { captureSeq, cameraFrameSeq: cameraFrameTotal,
+      captureTimeMs: Date.now(), epoch: runEpoch };
+    drawCaptureFrame(width, height);
+    const blobPromise = upCodecH264 ? null : frameBlob(effectiveUpQuality());
+    const result = await observeMouthFrame(frame);
+    if (runEpoch !== mouthTrackerEpoch || ws !== socket || socket.readyState !== WebSocket.OPEN) return;
     if (upCodecH264) {
-      encodeUplinkFrame(width, height, captureSeq);
+      encodeUplinkFrame(width, height, captureSeq, result, frame);
       updateMetrics();
       return;
     }
-    const blob = await frameBlob(width, height, effectiveUpQuality());
+    const blob = await blobPromise;
+    if (runEpoch !== mouthTrackerEpoch || ws !== socket) return;
     if (!blob || ws.readyState !== WebSocket.OPEN) return;
     const seq = sentFrames + 1;
-    const tCaptureMs = Date.now();
+    const tCaptureMs = frame.captureTimeMs;
     try {
-      ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, captureSeq, tCaptureMs) }));
+      ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, captureSeq, tCaptureMs, result, frame) }));
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(blob);
     } catch (err) {
@@ -1883,7 +1902,7 @@ async function tick() {
     sentFramesWindow += 1;
     updateMetrics();
   } finally {
-    tickInFlight = false;
+    if (tickEpoch === mouthTrackerEpoch) tickInFlight = false;
   }
 }
 
@@ -1901,12 +1920,17 @@ async function sendCurrentVideoFrame(mediaTimeSec) {
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
   const quality = effectiveUpQuality();
-  const blob = await frameBlob(width, height, quality);
-  if (!blob || ws.readyState !== WebSocket.OPEN) return false;
+  const socket = ws;
+  const epoch = mouthTrackerEpoch;
   const seq = sentFrames + 1;
+  const frame = { captureSeq: seq, cameraFrameSeq: ++cameraFrameTotal,
+    captureTimeMs: Date.now(), epoch };
+  drawCaptureFrame(width, height);
+  const [blob, result] = await Promise.all([frameBlob(quality), observeMouthFrame(frame)]);
+  if (!blob || epoch !== mouthTrackerEpoch || ws !== socket || socket.readyState !== WebSocket.OPEN) return false;
   const tCaptureMs = Math.round(mediaTimeSec * 1000);
   try {
-    ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, seq, tCaptureMs) }));
+    ws.send(JSON.stringify({ type: "frame_meta", ...uplinkFrameMeta(seq, seq, tCaptureMs, result, frame) }));
     if (ws.readyState !== WebSocket.OPEN) return false;
     ws.send(blob);
   } catch (err) {

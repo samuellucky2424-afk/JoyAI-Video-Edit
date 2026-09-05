@@ -27,6 +27,7 @@ def _jpeg_data_url(image: Image.Image) -> str:
 def _active_meta(patch: str):
     return {
         "mouth_landmark_available": True,
+        "mouth_landmark_age_ms": 0,
         "mouth_landmark_seq": 12,
         "mouth_roi": {"x": 0.4, "y": 0.4, "width": 0.2, "height": 0.2},
         "mouth_anatomy": {
@@ -51,6 +52,17 @@ def _active_meta(patch: str):
 
 
 class MouthPatchTests(unittest.TestCase):
+    def test_stale_and_mismatched_patch_cannot_modify_source_pixels(self):
+        frame = Image.new("RGB", (200, 100), "blue")
+        event = _active_meta(_jpeg_data_url(Image.new("RGB", (40, 20), "red")))
+        for fields in ({"mouth_landmark_age_ms": 10000},
+                       {"capture_seq": 4, "mouth_capture_seq": 5},
+                       {"identity_occlusion_risk": True}):
+            output, profile = apply_mouth_detail_patch(
+                frame, {**event, **fields}, enabled=True, max_gain=1.35)
+            self.assertIs(output, frame)
+            self.assertEqual(profile["mouth_patch_applied"], 0)
+
     def test_active_patch_is_feathered_into_source_before_vae(self):
         frame = Image.new("RGB", (200, 100), (20, 30, 40))
         patch = Image.new("RGB", (40, 20), (240, 20, 20))

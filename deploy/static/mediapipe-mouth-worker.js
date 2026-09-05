@@ -1,3 +1,4 @@
+import { normalizeLipPoints, expressionMotion } from "/static/face-tracking.js";
 /*
  * Browser-side MediaPipe mouth and hand-over-face telemetry.
  *
@@ -88,8 +89,7 @@ let handLandmarker = null;
 let delegate = "CPU";
 let handDelegate = null;
 let processing = false;
-let smoothedRoi = null;
-let smoothedEyeRois = { left: null, right: null };
+let lastFaceTimestampMs = null;
 let previousLipPoints = null;
 let previousJawOpen = null;
 let previousAnatomyEvidence = null;
@@ -103,50 +103,19 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
 }
 
-function smoothValue(previous, current, alpha = 0.35) {
-  return previous + alpha * (current - previous);
-}
-
-function stabilizeRoi(roi) {
-  if (!smoothedRoi) {
-    smoothedRoi = { ...roi };
-    return smoothedRoi;
-  }
-  smoothedRoi = {
-    x: smoothValue(smoothedRoi.x, roi.x),
-    y: smoothValue(smoothedRoi.y, roi.y),
-    width: smoothValue(smoothedRoi.width, roi.width),
-    height: smoothValue(smoothedRoi.height, roi.height),
-  };
-  return smoothedRoi;
-}
-
-function stabilizeEyeRoi(side, roi) {
-  const previous = smoothedEyeRois[side];
-  if (!previous) {
-    smoothedEyeRois[side] = { ...roi };
-    return smoothedEyeRois[side];
-  }
-  smoothedEyeRois[side] = {
-    x: smoothValue(previous.x, roi.x),
-    y: smoothValue(previous.y, roi.y),
-    width: smoothValue(previous.width, roi.width),
-    height: smoothValue(previous.height, roi.height),
-  };
-  return smoothedEyeRois[side];
-}
-
+// MediaPipe VIDEO mode with numFaces=1 already smooths landmarks.
+// Use its current padded ROI directly to avoid a second trailing filter.
 function eyeRois(landmarks) {
   const left = landmarkRoi(landmarks, LEFT_EYE_INDICES, 0.014, 0.018);
   const right = landmarkRoi(landmarks, RIGHT_EYE_INDICES, 0.014, 0.018);
   if (!left || !right) return null;
   return {
-    left: stabilizeEyeRoi("left", left),
-    right: stabilizeEyeRoi("right", right),
+    left,
+    right,
   };
 }
 
-function mouthRoi(landmarks) {
+function mouthRoi(landmarks, aspect) {
   const points = LIP_INDICES.map((index) => landmarks[index]).filter(Boolean);
   if (!points.length) return null;
 
@@ -166,13 +135,13 @@ function mouthRoi(landmarks) {
   const bottom = clamp01(maxY + padY);
 
   return {
-    roi: stabilizeRoi({
+    roi: {
       x,
       y,
       width: Math.max(0, right - x),
       height: Math.max(0, bottom - y),
-    }),
-    lipPoints: points.map((point) => [point.x, point.y, point.z || 0]),
+    },
+    lipPoints: normalizeLipPoints(points, landmarks[33], landmarks[263], aspect),
     lipWidth,
     lipHeight,
   };
@@ -190,19 +159,10 @@ function blendshapeMap(result, selectedNames) {
   return selected;
 }
 
-function lipMotion(currentPoints, lipWidth) {
-  if (!previousLipPoints || previousLipPoints.length !== currentPoints.length) {
-    previousLipPoints = currentPoints;
-    return 0;
-  }
-  let total = 0;
-  for (let index = 0; index < currentPoints.length; index += 1) {
-    const current = currentPoints[index];
-    const previous = previousLipPoints[index];
-    total += Math.hypot(current[0] - previous[0], current[1] - previous[1]);
-  }
+function lipMotion(currentPoints) {
+  const motion = expressionMotion(previousLipPoints, currentPoints);
   previousLipPoints = currentPoints;
-  return total / currentPoints.length / Math.max(lipWidth, 1e-6);
+  return motion;
 }
 
 function landmarkRoi(landmarks, indices = null, padX = 0, padY = 0) {
@@ -363,8 +323,7 @@ async function initialize(data) {
 }
 
 function resetTracking() {
-  smoothedRoi = null;
-  smoothedEyeRois = { left: null, right: null };
+  lastFaceTimestampMs = null;
   previousLipPoints = null;
   previousJawOpen = null;
   previousAnatomyEvidence = null;
@@ -397,6 +356,8 @@ async function detectFrame(data) {
     self.postMessage({
       type: "dropped",
       epoch: data.epoch,
+      requestId: data.requestId,
+      captureSeq: data.captureSeq,
       cameraFrameSeq: data.cameraFrameSeq,
     });
     return;
@@ -411,6 +372,8 @@ async function detectFrame(data) {
       self.postMessage({
         type: "result",
         epoch: data.epoch,
+        requestId: data.requestId,
+        captureSeq: data.captureSeq,
         cameraFrameSeq: data.cameraFrameSeq,
         timestampMs: data.timestampMs,
         captureTimeMs: data.captureTimeMs,
@@ -437,11 +400,17 @@ async function detectFrame(data) {
     }
     const occlusion = identityOcclusion(landmarks, latestHandResult);
 
-    const mouth = mouthRoi(landmarks);
+    if (lastFaceTimestampMs !== null && data.timestampMs - lastFaceTimestampMs > 250) {
+      previousLipPoints = null;
+      previousJawOpen = null;
+      previousAnatomyEvidence = null;
+    }
+    lastFaceTimestampMs = data.timestampMs;
+    const mouth = mouthRoi(landmarks, bitmap.width / bitmap.height);
     const eyes = eyeRois(landmarks);
     const blendshapes = blendshapeMap(result, MOUTH_BLENDSHAPES);
     const eyeBlendshapes = blendshapeMap(result, EYE_BLENDSHAPES);
-    const motion = mouth ? lipMotion(mouth.lipPoints, mouth.lipWidth) : 0;
+    const motion = mouth ? lipMotion(mouth.lipPoints) : 0;
     const jawOpen = Number(blendshapes.jawOpen || 0);
     const lipAspect = mouth
       ? mouth.lipHeight / Math.max(mouth.lipWidth, 1e-6)
@@ -469,6 +438,8 @@ async function detectFrame(data) {
     self.postMessage({
       type: "result",
       epoch: data.epoch,
+      requestId: data.requestId,
+      captureSeq: data.captureSeq,
       cameraFrameSeq: data.cameraFrameSeq,
       timestampMs: data.timestampMs,
       captureTimeMs: data.captureTimeMs,
@@ -497,6 +468,8 @@ async function detectFrame(data) {
     self.postMessage({
       type: "detect_error",
       epoch: data.epoch,
+      requestId: data.requestId,
+      captureSeq: data.captureSeq,
       cameraFrameSeq: data.cameraFrameSeq,
       error: error instanceof Error ? error.message : String(error),
     });

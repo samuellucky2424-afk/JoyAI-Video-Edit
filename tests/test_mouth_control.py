@@ -33,6 +33,7 @@ def anatomy(**evidence):
 def meta(sequence, *, roi=None, anatomy_payload=None, blendshapes=None, significant=False):
     return {
         "mouth_landmark_available": True,
+        "mouth_landmark_age_ms": 0,
         "mouth_landmark_seq": sequence,
         "mouth_roi": roi or {"x": 0.4, "y": 0.42, "width": 0.2, "height": 0.16},
         "mouth_anatomy": anatomy_payload or anatomy(),
@@ -43,6 +44,21 @@ def meta(sequence, *, roi=None, anatomy_payload=None, blendshapes=None, signific
 
 
 class MouthControlTests(unittest.TestCase):
+    def test_capture_age_and_identity_are_checked_before_activation(self):
+        event = meta(1, significant=True)
+        for age in (None, True, -1, 101, 10000, float("inf"), float("nan"), "invalid"):
+            with self.subTest(age=age):
+                self.assertFalse(MOUTH_CONTROL.build_mouth_control(
+                    [{**event, "mouth_landmark_age_ms": age}], enabled=True, max_gain=1.35).active)
+        for fields in ({"identity_occlusion_risk": True},
+                       {"capture_seq": 4, "mouth_capture_seq": 5},
+                       {"capture_seq": 1, "mouth_capture_seq": True}):
+            self.assertFalse(MOUTH_CONTROL.build_mouth_control(
+                [{**event, **fields}], enabled=True, max_gain=1.35).active)
+        self.assertTrue(MOUTH_CONTROL.build_mouth_control(
+            [{**event, "capture_seq": 4, "mouth_capture_seq": 4,
+              "mouth_landmark_age_ms": 100}], enabled=True, max_gain=1.35).active)
+
     def test_visible_anatomy_activates_bounded_deduplicated_roi_control(self):
         first = meta(10, anatomy_payload=anatomy(teeth=0.9))
         duplicate = dict(first)

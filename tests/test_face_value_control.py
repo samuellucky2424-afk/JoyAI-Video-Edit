@@ -28,6 +28,7 @@ from xvideo.serving.mouth_anatomy import (  # noqa: E402
 def _meta(*, anatomy=None, mouth=None, eyes=None, eye_rois=None, seq=21):
     return {
         "mouth_landmark_available": True,
+        "mouth_landmark_age_ms": 0,
         "mouth_landmark_seq": seq,
         "mouth_roi": {"x": 0.4, "y": 0.58, "width": 0.2, "height": 0.16},
         "mouth_anatomy": {
@@ -72,6 +73,54 @@ class FaceValueControlGeometryTests(unittest.TestCase):
     "torch is not installed in the lightweight test environment",
 )
 class FaceValueControlTensorTests(unittest.TestCase):
+    def test_live_single_slice_weights_a_brief_event_by_its_duration(self):
+        latent = torch.zeros(1, 8, 1, 20, 35)
+        event = _meta(mouth={"jawOpen": 0.95}, eyes={"eyeBlinkLeft": 0.96})
+        def scale(samples):
+            return build_face_value_scale(latent, samples, enabled=True,
+                                          max_gain=1.35, patch_size=(1, 1, 1))
+        brief = scale([event] + [_meta(seq=i) for i in range(1, 8)])
+        sustained = scale([{**event, "mouth_landmark_seq": i} for i in range(8)])
+        self.assertFalse(torch.equal(brief, sustained))
+        torch.testing.assert_close(brief - 1, (sustained - 1) / 8, atol=1e-7, rtol=1e-5)
+        torch.testing.assert_close(sustained, scale([event]))
+
+    def test_moving_roi_does_not_boost_the_unobserved_space_between_positions(self):
+        latent = torch.zeros(1, 8, 1, 40, 80)
+        event = _meta(mouth={"jawOpen": 0.95})
+        left = {**event, "mouth_roi": {"x": 0.1, "y": 0.5, "width": 0.1, "height": 0.1}}
+        right = {**event, "mouth_landmark_seq": 22,
+                 "mouth_roi": {"x": 0.8, "y": 0.5, "width": 0.1, "height": 0.1}}
+        scale = build_face_value_scale(latent, [left, right], enabled=True,
+                                      max_gain=1.35, patch_size=(1, 1, 1)).view(40, 80)
+        self.assertGreater(float(scale[:, :20].max()), 1)
+        self.assertGreater(float(scale[:, 60:].max()), 1)
+        self.assertTrue(torch.all(scale[:, 25:55] == 1))
+
+    def test_invalid_positions_are_not_removed_from_temporal_weighting(self):
+        latent = torch.zeros(1, 8, 1, 20, 35)
+        event = _meta(mouth={"jawOpen": 0.95})
+        def scale(samples):
+            return build_face_value_scale(latent, samples, enabled=True,
+                                          max_gain=1.35, patch_size=(1, 1, 1))
+        expected = scale([event, _meta()])
+        for invalid in (None, "broken", {}, {**event, "mouth_landmark_age_ms": 10000}):
+            torch.testing.assert_close(scale([event, invalid]), expected)
+
+    def test_stale_mismatched_and_occluded_inputs_are_exact_noops(self):
+        latent = torch.zeros(1, 8, 1, 20, 35)
+        event = _meta(mouth={"jawOpen": 0.95}, eyes={"eyeBlinkLeft": 0.96})
+        for fields in (
+            {"mouth_landmark_age_ms": None}, {"mouth_landmark_age_ms": -1},
+            {"mouth_landmark_age_ms": 101}, {"mouth_landmark_age_ms": float("nan")},
+            {"mouth_landmark_age_ms": True}, {"identity_occlusion_risk": True},
+            {"capture_seq": 8, "mouth_capture_seq": 7},
+        ):
+            with self.subTest(fields=fields):
+                self.assertIsNone(build_face_value_scale(
+                    latent, [{**event, **fields}], enabled=True,
+                    max_gain=1.35, patch_size=(1, 1, 1)))
+
     def test_teeth_tongue_and_round_mouth_build_a_bounded_local_scale(self):
         latent = torch.zeros(1, 8, 1, 20, 35, dtype=torch.bfloat16)
         cases = (

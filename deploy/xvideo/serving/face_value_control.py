@@ -15,7 +15,9 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
-from xvideo.serving.mouth_control import build_mouth_control, normalize_mouth_roi
+from xvideo.serving.mouth_control import (
+    build_mouth_control, fresh_face_meta, normalize_mouth_roi,
+)
 
 
 # Attention values are more direct than latent amplitude (which is normalized
@@ -34,6 +36,8 @@ class _Region:
     roi: tuple[float, float, float, float]
     gain: float
     latent_frames: tuple[int, ...]
+    sample_index: int
+    sample_weight: float
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -52,23 +56,6 @@ def _unit_score(value: Any) -> float:
     return max(0.0, min(1.0, score))
 
 
-def _unique_fresh_metas(
-    metas: Iterable[Mapping[str, Any]],
-) -> list[Mapping[str, Any]]:
-    unique: dict[tuple[str, Any], Mapping[str, Any]] = {}
-    for index, meta in enumerate(metas):
-        if not isinstance(meta, Mapping):
-            continue
-        sequence = meta.get("mouth_landmark_seq")
-        try:
-            hash(sequence)
-        except TypeError:
-            sequence = None
-        key = ("seq", sequence) if sequence is not None else ("index", index)
-        unique[key] = meta
-    return list(unique.values())
-
-
 def _temporal_meta_buckets(
     metas: Sequence[Mapping[str, Any]],
     *,
@@ -76,16 +63,15 @@ def _temporal_meta_buckets(
 ) -> list[list[Mapping[str, Any]]]:
     """Map ordered camera metadata onto the VAE's latent time slices.
 
-    Live chunks contain eight new camera frames and two post-VAE latent
-    frames.  Equal contiguous buckets therefore preserve the causal 4:1
-    temporal compression instead of letting one short expression activate the
-    entire chunk.  The generic partition also keeps unit tests and the first
-    one-frame chunk well defined.
+    The live runtime retains ONE latent time slice per chunk. A scale cannot
+    express sub-frame timing within that slice. Average per-source-frame maps
+    inside each bucket instead of treating a brief event as a sustained one.
+    Multi-slice inputs remain supported without assuming a fixed VAE ratio.
     """
 
     if latent_frames < 1:
         return []
-    ordered = [meta for meta in metas if isinstance(meta, Mapping)]
+    ordered = [_mapping(meta) for meta in metas]
     if not ordered:
         return [[] for _ in range(latent_frames)]
     buckets: list[list[Mapping[str, Any]]] = []
@@ -152,21 +138,6 @@ def _eye_strength(meta: Mapping[str, Any], side: str) -> float:
     return max((_unit_score(blend.get(key)) for key in _EYE_KEYS[side]), default=0.0)
 
 
-def _union_roi(
-    values: Sequence[tuple[float, float, float, float]],
-) -> tuple[float, float, float, float]:
-    left = min(roi[0] for roi in values)
-    top = min(roi[1] for roi in values)
-    right = max(roi[0] + roi[2] for roi in values)
-    bottom = max(roi[1] + roi[3] for roi in values)
-    return (
-        round(left, 6),
-        round(top, 6),
-        round(right - left, 6),
-        round(bottom - top, 6),
-    )
-
-
 def _mouth_interior_roi(
     roi: tuple[float, float, float, float],
 ) -> tuple[float, float, float, float]:
@@ -189,81 +160,51 @@ def _build_regions(
 ) -> tuple[list[_Region], list[str], list[str]]:
     regions: list[_Region] = []
     mouth_events: set[str] = set()
-    eye_sides: list[str] = []
+    eye_sides: set[str] = set()
     bounded_eye_gain = min(float(max_gain), EYE_VALUE_MAX_GAIN)
     for latent_index, bucket in enumerate(
         _temporal_meta_buckets(metas, latent_frames=latent_frames)
     ):
-        fresh = _unique_fresh_metas(bucket)
-        if not fresh:
-            continue
-
-        bucket_events: set[str] = set()
-        mouth = build_mouth_control(fresh, enabled=True, max_gain=max_gain)
-        if mouth.active and mouth.roi is not None:
-            for meta in fresh:
-                if bool(meta.get("mouth_landmark_available")):
-                    bucket_events.update(_mouth_events(meta))
-            mouth_events.update(bucket_events)
-            regions.append(
-                _Region(
-                    name="mouth",
-                    roi=mouth.roi,
-                    gain=min(float(mouth.gain), MOUTH_VALUE_MAX_GAIN),
-                    latent_frames=(latent_index,),
-                )
+        # Include neutral, unavailable and malformed positions in the divisor.
+        # Removing them would turn a single observation into a whole-chunk event.
+        for sample_index, meta in enumerate(bucket):
+            if not fresh_face_meta(meta):
+                continue
+            common = dict(
+                latent_frames=(latent_index,),
+                sample_index=sample_index,
+                sample_weight=1.0 / len(bucket),
             )
-            if bucket_events.intersection({"teeth", "tongue", "oral_cavity"}):
-                regions.append(
-                    _Region(
-                        name="mouth_interior",
-                        roi=_mouth_interior_roi(mouth.roi),
-                        gain=min(
-                            float(mouth.gain),
-                            MOUTH_INTERIOR_VALUE_MAX_GAIN,
-                        ),
-                        latent_frames=(latent_index,),
-                    )
-                )
-
-        for side in ("left", "right"):
-            candidates: list[
-                tuple[tuple[float, float, float, float], float]
-            ] = []
-            for meta in fresh:
-                if not bool(meta.get("eye_landmark_available")):
+            mouth = build_mouth_control([meta], enabled=True, max_gain=max_gain)
+            if mouth.active and mouth.roi is not None:
+                events = _mouth_events(meta)
+                mouth_events.update(events)
+                regions.append(_Region(
+                    name="mouth", roi=mouth.roi,
+                    gain=min(float(mouth.gain), MOUTH_VALUE_MAX_GAIN), **common,
+                ))
+                if events.intersection({"teeth", "tongue", "oral_cavity"}):
+                    regions.append(_Region(
+                        name="mouth_interior", roi=_mouth_interior_roi(mouth.roi),
+                        gain=min(float(mouth.gain), MOUTH_INTERIOR_VALUE_MAX_GAIN),
+                        **common,
+                    ))
+            for side in ("left", "right"):
+                if meta.get("eye_landmark_available") is not True:
                     continue
-                roi = normalize_mouth_roi(
-                    _mapping(meta.get("eye_rois")).get(side)
-                )
+                roi = normalize_mouth_roi(_mapping(meta.get("eye_rois")).get(side))
                 strength = _eye_strength(meta, side)
-                if roi is None or strength < FACE_EVENT_ACTIVE_THRESHOLD:
+                if roi is None or strength <= FACE_EVENT_ACTIVE_THRESHOLD:
                     continue
-                candidates.append((roi, strength))
-            if not candidates:
-                continue
-            strength = max(item[1] for item in candidates)
-            normalized = max(
-                0.0,
-                min(
-                    1.0,
-                    (strength - FACE_EVENT_ACTIVE_THRESHOLD)
-                    / (1.0 - FACE_EVENT_ACTIVE_THRESHOLD),
-                ),
-            )
-            gain = 1.0 + (bounded_eye_gain - 1.0) * normalized
-            if gain <= 1.0:
-                continue
-            regions.append(
-                _Region(
-                    name=f"eye_{side}",
-                    roi=_union_roi([item[0] for item in candidates]),
-                    gain=gain,
-                    latent_frames=(latent_index,),
+                normalized = (strength - FACE_EVENT_ACTIVE_THRESHOLD) / (
+                    1.0 - FACE_EVENT_ACTIVE_THRESHOLD
                 )
-            )
-            eye_sides.append(side)
-    return regions, sorted(mouth_events), sorted(set(eye_sides))
+                regions.append(_Region(
+                    name=f"eye_{side}", roi=roi,
+                    gain=1.0 + (bounded_eye_gain - 1.0) * normalized, **common,
+                ))
+                eye_sides.add(side)
+    return regions, sorted(mouth_events), sorted(eye_sides)
 
 
 def _latent_box(
@@ -309,6 +250,8 @@ def _profile(
                     "roi": list(region.roi),
                     "gain": round(float(region.gain), 6),
                     "latent_frames": list(region.latent_frames),
+                    "sample_index": region.sample_index,
+                    "sample_weight": region.sample_weight,
                 }
                 for region in regions
             ],
@@ -374,7 +317,7 @@ def build_face_value_scale(
         _profile(profile, applied=False, reason="incompatible_patch_size")
         return None
 
-    ordered_metas = [meta for meta in metas if isinstance(meta, Mapping)]
+    ordered_metas = [_mapping(meta) for meta in metas]
     regions, mouth_events, eye_sides = _build_regions(
         ordered_metas,
         max_gain=bounded_gain,
@@ -390,47 +333,46 @@ def build_face_value_scale(
         )
         return None
 
-    scale_map = torch.ones(
-        (batch, 1, frames, height, width),
-        device=ref_video_latent.device,
-        dtype=torch.float32,
-    )
-    changed_cells: set[tuple[int, int, int]] = set()
+    # Rasterize the small ROI maps on CPU, then transfer once. Launching many
+    # tiny GPU operations for every camera sample would stall the live pipeline.
+    sample_maps: dict[tuple[int, int], dict[int, float]] = {}
+    weights: dict[tuple[int, int], float] = {}
     applied_regions: list[_Region] = []
     for region in regions:
         box = _latent_box(region.roi, height=height, width=width)
         if box is None:
             continue
         left, top, right, bottom = box
-        roi_height = bottom - top
-        roi_width = right - left
-        y = torch.arange(roi_height, device=scale_map.device, dtype=torch.float32)
-        x = torch.arange(roi_width, device=scale_map.device, dtype=torch.float32)
-        y_distance = torch.minimum(y, (roi_height - 1) - y)
-        x_distance = torch.minimum(x, (roi_width - 1) - x)
-        y_width = max(1.0, min(2.0, float(max(1, roi_height - 1)) / 2.0))
-        x_width = max(1.0, min(2.0, float(max(1, roi_width - 1)) / 2.0))
-        y_feather = 0.35 + 0.65 * torch.clamp(y_distance / y_width, 0.0, 1.0)
-        x_feather = 0.35 + 0.65 * torch.clamp(x_distance / x_width, 0.0, 1.0)
-        feather = (y_feather.unsqueeze(1) * x_feather.unsqueeze(0)).view(
-            1, 1, 1, roi_height, roi_width
-        )
-        candidate = 1.0 + (float(region.gain) - 1.0) * feather
+        roi_height, roi_width = bottom - top, right - left
+        y_width = max(1.0, min(2.0, max(1, roi_height - 1) / 2.0))
+        x_width = max(1.0, min(2.0, max(1, roi_width - 1) / 2.0))
         for latent_index in region.latent_frames:
-            if not 0 <= latent_index < frames:
-                continue
-            target = scale_map[
-                :, :, latent_index : latent_index + 1, top:bottom, left:right
-            ]
-            scale_map[
-                :, :, latent_index : latent_index + 1, top:bottom, left:right
-            ] = torch.maximum(target, candidate)
-            changed_cells.update(
-                (latent_index, row, column)
-                for row in range(top, bottom)
-                for column in range(left, right)
-            )
+            key = (latent_index, region.sample_index)
+            sample_map = sample_maps.setdefault(key, {})
+            weights[key] = region.sample_weight
+            for row in range(top, bottom):
+                fy = 0.35 + 0.65 * min(1.0, min(row-top, bottom-1-row) / y_width)
+                for col in range(left, right):
+                    fx = 0.35 + 0.65 * min(1.0, min(col-left, right-1-col) / x_width)
+                    cell = (latent_index * height + row) * width + col
+                    delta = (region.gain - 1.0) * fy * fx
+                    # Mouth + interior overlap within one frame uses max, not
+                    # addition. Different source frames contribute their mean.
+                    sample_map[cell] = max(sample_map.get(cell, 0.0), delta)
         applied_regions.append(region)
+    values = [1.0] * (frames * height * width)
+    changed_cells: set[int] = set()
+    for key, sample_map in sample_maps.items():
+        for cell, delta in sample_map.items():
+            values[cell] += delta * weights[key]
+            changed_cells.add(cell)
+    scale_map = torch.tensor(values, device=ref_video_latent.device, dtype=torch.float32)
+    scale_map = scale_map.view(1, 1, frames, height, width).expand(batch, -1, -1, -1, -1)
+    if profile is not None:
+        profile["face_value_control_temporal_mode"] = "mean_source_frame_maps"
+        profile["face_value_control_latent_frames"] = frames
+        profile["face_value_control_source_frames"] = len(ordered_metas)
+        profile["face_value_control_max_gain"] = max(values)
 
     if not applied_regions:
         _profile(

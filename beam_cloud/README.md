@@ -4,18 +4,24 @@ Beam is now the deployment target for JoyAI. This configuration imports the
 already validated RTX PRO 6000 Blackwell image by immutable digest. It does not
 retrain, quantize, replace, or write to the original JoyAI checkpoint.
 
+The facial-stability source fix is prepared for a future test. **It is not in
+the pinned container below.** See [FACE_STABILITY_RETEST.md](FACE_STABILITY_RETEST.md)
+before starting a GPU: checking out the fixed branch alone does not update the
+code inside Beam's immutable image.
+
 ## Fixed runtime
 
 | Setting | Value |
 |---|---|
 | GPU | Beam on-demand RTX PRO 6000, 96 GB |
 | Pod system RAM | 64 GiB |
-| Container | `sha256:91d93e9608687c08a22e8d0bda7383ee104a97422d1fdfa7604f9f3196b1faf4` |
-| Image source commit | `84838a0e6b8cb5a814e73a412ba7a605ddde1cb1` |
+| Container | `sha256:609fd1d3019a00af1cea06daf8f80efca992d41f1c855bbf02257e1c70e43df3` |
+| Image source commit | `b505b89025ded46657c7342511af1788ae0ac743` |
 | JoyAI release | `eda14f342ef99c52485bbb8dc271c29b42298089` |
 | DiT SHA256 | `b3904b6fda53d13b230918bb616f322d12cfb2337b0e8d9dc203cdabc36605ba` |
 | Resolution / FPS | 840x480 at 24 FPS |
-| Mouth latent control | Enabled for validation; hard-capped at 1.125x |
+| Mouth latent control | Disabled |
+| Face attention-value control | Enabled; awaiting the stability fix image |
 | Port | 8080 |
 | Persistent volume | `joyai-models-v1` at `/workspace/joyai` |
 

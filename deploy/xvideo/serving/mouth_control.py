@@ -22,6 +22,38 @@ from xvideo.serving.mouth_anatomy import (
 MOUTH_CONTROL_MIN_GAIN = 1.0
 MOUTH_CONTROL_MAX_GAIN = 1.5
 MOUTH_CONTROL_ACTIVE_THRESHOLD = 0.15
+FACE_METADATA_MAX_AGE_MS = 100.0
+
+
+def fresh_face_meta(meta: Mapping[str, Any]) -> bool:
+    """Validate capture-relative age and optional exact-frame identifiers.
+
+    Server wall-clock time is deliberately excluded: capture timestamps belong
+    to the browser, and queued inference must keep its original frame pairing.
+    """
+    age = meta.get("mouth_landmark_age_ms")
+    if isinstance(age, bool):
+        return False
+    try:
+        age = float(age)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(age) or not 0 <= age <= FACE_METADATA_MAX_AGE_MS:
+        return False
+    if meta.get("identity_occlusion_risk") is True:
+        return False
+    # Older clients provide age only. New clients additionally identify the
+    # exact captured image; partial or mismatched identifiers are rejected.
+    tracked = meta.get("mouth_capture_seq")
+    if tracked is not None:
+        captured = meta.get("capture_seq")
+        if (
+            isinstance(tracked, bool) or not isinstance(tracked, int)
+            or isinstance(captured, bool) or not isinstance(captured, int)
+            or tracked != captured
+        ):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -151,7 +183,9 @@ def build_mouth_control(
     for index, raw_meta in enumerate(metas):
         if not isinstance(raw_meta, Mapping):
             continue
-        if not bool(raw_meta.get("mouth_landmark_available")):
+        if not fresh_face_meta(raw_meta):
+            continue
+        if raw_meta.get("mouth_landmark_available") is not True:
             continue
         sequence = raw_meta.get("mouth_landmark_seq")
         try:

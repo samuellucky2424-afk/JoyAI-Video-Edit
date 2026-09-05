@@ -49,6 +49,7 @@ class FrameAudit:
         "client_uplink_drop_total",
         "client_drain_factor",
         "mouth_landmark_seq",
+        "mouth_capture_seq",
         "mouth_landmark_age_ms",
         "mouth_landmark_available",
         "mouth_roi",
