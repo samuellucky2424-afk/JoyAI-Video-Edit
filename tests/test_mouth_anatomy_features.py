@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+NODE = os.environ.get("NODE_BINARY") or shutil.which("node")
 FEATURES_PATH = ROOT / "deploy" / "static" / "mouth-anatomy-features.js"
 CONTRACT_PATH = ROOT / "deploy" / "xvideo" / "serving" / "mouth_anatomy.py"
 SPEC = importlib.util.spec_from_file_location("mouth_anatomy", CONTRACT_PATH)
@@ -33,7 +35,7 @@ class MouthAnatomyFeatureTests(unittest.TestCase):
         self.assertIn("mouth_anatomy: available ?", html)
         self.assertIn('@app.get("/static/mouth-anatomy-features.js")', server)
 
-    @unittest.skipUnless(shutil.which("node"), "Node.js is required for JS feature tests")
+    @unittest.skipUnless(NODE, "Node.js is required for JS feature tests")
     def test_synthetic_roi_detects_all_regions_and_temporal_change(self):
         script = f"""
 import {{
@@ -102,7 +104,7 @@ const clipped = analyzeMouthAnatomy(frame(true), clippedLandmarks);
 process.stdout.write(JSON.stringify({{ first, second, missing, clipped }}));
 """
         completed = subprocess.run(
-            [shutil.which("node"), "--input-type=module", "-e", script],
+            [NODE, "--input-type=module", "-e", script],
             cwd=ROOT,
             check=True,
             capture_output=True,
@@ -127,7 +129,7 @@ process.stdout.write(JSON.stringify({{ first, second, missing, clipped }}));
         self.assertFalse(missing["significant"])
         self.assertFalse(clipped["available"])
 
-    @unittest.skipUnless(shutil.which("node"), "Node.js is required for JS feature tests")
+    @unittest.skipUnless(NODE, "Node.js is required for JS feature tests")
     def test_spatial_encoder_separates_overexposed_tongue_from_white_teeth(self):
         script = f"""
 import {{
@@ -258,7 +260,7 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
         completed = subprocess.run(
-            [shutil.which("node"), "--input-type=module", "-e", script],
+            [NODE, "--input-type=module", "-e", script],
             cwd=ROOT,
             check=True,
             capture_output=True,

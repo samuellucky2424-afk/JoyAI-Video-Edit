@@ -23,6 +23,7 @@ from xvideo.serving.mouth_latent_control import (  # noqa: E402
 def _meta(*, significant=True, tongue=0.9, roi=None):
     return {
         "mouth_landmark_available": True,
+        "mouth_landmark_age_ms": 0,
         "mouth_landmark_seq": 42,
         "mouth_roi": roi
         or {"x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5},

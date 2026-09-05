@@ -693,6 +693,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             media_type="text/javascript",
         )
 
+    @app.get("/static/face-tracking.js")
+    def face_tracking_helpers() -> FileResponse:
+        return FileResponse(
+            str(_MEDIAPIPE_MOUTH_WORKER_PATH.with_name("face-tracking.js")),
+            media_type="text/javascript",
+        )
+
     @app.get("/static/mouth-anatomy-features.js")
     def mouth_anatomy_features() -> FileResponse:
         return FileResponse(
@@ -1848,6 +1855,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "client_uplink_drop_total": payload.get("client_uplink_drop_total"),
                             "client_drain_factor": payload.get("client_drain_factor"),
                             "mouth_landmark_seq": payload.get("mouth_landmark_seq"),
+                            "mouth_capture_seq": payload.get("mouth_capture_seq"),
                             "mouth_landmark_age_ms": payload.get("mouth_landmark_age_ms"),
                             "mouth_landmark_available": payload.get("mouth_landmark_available"),
                             "mouth_roi": payload.get("mouth_roi"),
